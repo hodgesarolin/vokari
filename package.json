@@ -1,0 +1,47 @@
+{
+  "name": "@vokari/epistemic",
+  "version": "0.1.0",
+  "description": "Self-verification engine for AI assistants — correction store, calibration tracking, and context injection via MCP",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "epistemic": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run",
+    "import": "tsx src/cli.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hodgesarolin/vokari.git"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "corrections",
+    "calibration",
+    "epistemology",
+    "self-verification"
+  ],
+  "author": "Daniel Hodges",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/hodgesarolin/vokari/issues"
+  },
+  "homepage": "https://github.com/hodgesarolin/vokari#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "better-sqlite3": "^12.6.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
