@@ -1,7 +1,7 @@
 {
   "name": "@vokari/epistemic",
-  "version": "0.1.0",
-  "description": "Self-verification engine for AI assistants — correction store, calibration tracking, and context injection via MCP",
+  "version": "0.2.0",
+  "description": "Epistemic engine for AI assistants — beliefs, predictions, corrections, calibration, awareness, and context injection via MCP",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,8 +22,11 @@
   "keywords": [
     "mcp",
     "ai",
+    "beliefs",
+    "predictions",
     "corrections",
     "calibration",
+    "metacognition",
     "epistemology",
     "self-verification"
   ],

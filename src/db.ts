@@ -1,5 +1,9 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { initBeliefs } from './beliefs.js';
+import { initPredictions } from './predictions.js';
+import { initPositions } from './positions.js';
+import { initEvents } from './events.js';
 
 export type CorrectionType = 'fact' | 'pattern' | 'policy' | 'technical';
 export type Permanence = 'never' | 'conditional' | 'graduable';
@@ -55,6 +59,10 @@ export function initDb(path: string): Database.Database {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
+  initBeliefs(db);
+  initPredictions(db);
+  initPositions(db);
+  initEvents(db);
   return db;
 }
 
