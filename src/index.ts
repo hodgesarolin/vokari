@@ -161,3 +161,25 @@ export {
   compactLog,
   getRecurringThemes,
 } from './distill.js';
+
+// F9 — Adversarial Verification
+export {
+  initVerifications,
+  createVerification,
+  getVerification,
+  verificationTick,
+  recordVerification,
+  skipVerification,
+  getBeliefVerifications,
+  verificationStatus,
+} from './verification.js';
+
+export type {
+  Verification,
+  VerificationStatus,
+  VerificationOutcome,
+  VerificationStrategy,
+  VerificationTickItem,
+  VerificationTickResult,
+  VerificationStats,
+} from './verification.js';
