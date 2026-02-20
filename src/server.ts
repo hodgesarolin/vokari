@@ -25,6 +25,11 @@ import {
 import { compileAwarenessContext } from './awareness.js';
 import { extractBeliefs as extractLearningBeliefs, extractTopics, extractCorrections as extractLearningCorrections, extractUrls } from './learning.js';
 import { analyzeCycling, analyzeAttentionBudget } from './metacognition.js';
+import {
+  verificationTick, createVerification, recordVerification,
+  skipVerification, verificationStatus, getBeliefVerifications,
+} from './verification.js';
+import type { VerificationOutcome, VerificationStrategy } from './verification.js';
 import type { AttentionCategory } from './metacognition.js';
 import { extractSignal, buildDigest, DEFAULT_NOISE_PATTERNS, DEFAULT_SIGNAL_PATTERNS } from './distill.js';
 
@@ -597,6 +602,100 @@ server.tool(
   async (params) => {
     const digest = buildDigest(params.title, params.content, DEFAULT_NOISE_PATTERNS, DEFAULT_SIGNAL_PATTERNS);
     return { content: [{ type: 'text' as const, text: digest }] };
+  },
+);
+
+// ────────────────────────────────────────────
+// F9 — Adversarial Verification
+// ────────────────────────────────────────────
+
+server.tool(
+  'verification_tick',
+  'Get beliefs due for adversarial review. Call this whenever you have attention budget. Returns prioritized items — verify them, then call record_verification with results.',
+  {
+    budget: z.number().optional().default(3).describe('Max items to return (default 3)'),
+    cooldown_hours: z.number().optional().default(24).describe('Skip beliefs verified within this window (default 24h)'),
+  },
+  async (params) => {
+    const result = verificationTick(db, params.budget, params.cooldown_hours);
+    if (result.items.length === 0) {
+      return { content: [{ type: 'text' as const, text: `No beliefs due for verification. ${result.skipped} skipped (recently verified). ${result.total_pending} pending.` }] };
+    }
+    const lines = result.items.map(item => [
+      `**[${item.verification_id.slice(0, 8)}]** ${item.belief_statement}`,
+      `  Category: ${item.belief_category} | Confidence: ${Math.round(item.belief_confidence * 100)}% | Strategy: ${item.strategy}`,
+      `  Last confirmed: ${item.last_confirmed ?? 'never'} | Contradictions: ${item.contradiction_count}`,
+      `  → Challenge this belief. Try to find evidence it's wrong. Then call record_verification.`,
+    ].join('\n'));
+    const summary = `\n\n---\n${result.items.length} items claimed. ${result.skipped} skipped. ${result.total_pending} still pending.`;
+    return { content: [{ type: 'text' as const, text: lines.join('\n\n') + summary }] };
+  },
+);
+
+server.tool(
+  'create_verification',
+  'Manually queue a specific belief for adversarial review',
+  {
+    belief_id: z.string().describe('Belief ID to verify'),
+    strategy: z.enum(['never_verified', 'staleness', 'contradiction', 'high_confidence', 'challenged', 'manual']).optional().default('manual'),
+  },
+  async (params) => {
+    const id = createVerification(db, params.belief_id, params.strategy as VerificationStrategy);
+    return { content: [{ type: 'text' as const, text: `Verification queued: ${id.slice(0, 8)} for belief ${params.belief_id.slice(0, 8)}` }] };
+  },
+);
+
+server.tool(
+  'record_verification',
+  'Record the result of an adversarial review. Call after verification_tick returns items and you have challenged the belief.',
+  {
+    verification_id: z.string().describe('Verification ID from verification_tick'),
+    outcome: z.enum(['confirmed', 'revised', 'contradicted', 'inconclusive']).describe('What the review found'),
+    evidence: z.array(z.string()).optional().describe('Evidence supporting the conclusion'),
+    notes: z.string().optional().describe('Free-text notes from the review'),
+  },
+  async (params) => {
+    const result = recordVerification(db, params.verification_id, params.outcome as VerificationOutcome, params.evidence, params.notes);
+    if (!result) return { content: [{ type: 'text' as const, text: `Verification not found: ${params.verification_id}` }] };
+    return { content: [{ type: 'text' as const, text: `Verification ${params.verification_id.slice(0, 8)} completed: ${params.outcome}${params.notes ? ` — ${params.notes}` : ''}` }] };
+  },
+);
+
+server.tool(
+  'skip_verification',
+  'Skip a verification that cannot be completed (e.g., belief retired, insufficient context). Releases the item so the belief can be picked up again after cooldown.',
+  {
+    verification_id: z.string().describe('Verification ID from verification_tick'),
+    reason: z.string().optional().describe('Why the verification was skipped'),
+  },
+  async (params) => {
+    skipVerification(db, params.verification_id, params.reason);
+    return { content: [{ type: 'text' as const, text: `Verification ${params.verification_id.slice(0, 8)} skipped${params.reason ? `: ${params.reason}` : ''}` }] };
+  },
+);
+
+server.tool(
+  'verification_status',
+  'Get adversarial verification statistics — coverage, outcomes, staleness',
+  {},
+  async () => {
+    const s = verificationStatus(db);
+    const parts = [
+      `Total verifications: ${s.total}`,
+      `By status: pending=${s.by_status.pending}, in_progress=${s.by_status.in_progress}, completed=${s.by_status.completed}, skipped=${s.by_status.skipped}`,
+      `By outcome: confirmed=${s.by_outcome.confirmed}, revised=${s.by_outcome.revised}, contradicted=${s.by_outcome.contradicted}, inconclusive=${s.by_outcome.inconclusive}`,
+      `Belief coverage: ${s.beliefs_verified} verified, ${s.beliefs_never_verified} never verified`,
+    ];
+    if (s.average_time_to_verify_hours !== null) {
+      parts.push(`Average verify time: ${s.average_time_to_verify_hours.toFixed(1)}h`);
+    }
+    if (s.oldest_unverified_days !== null) {
+      parts.push(`Oldest unverified: ${s.oldest_unverified_days.toFixed(1)} days`);
+    }
+    if (Object.keys(s.by_strategy).length > 0) {
+      parts.push(`By strategy: ${Object.entries(s.by_strategy).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    }
+    return { content: [{ type: 'text' as const, text: parts.join('\n') }] };
   },
 );
 
