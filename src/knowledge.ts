@@ -150,7 +150,9 @@ export function initKnowledge(db: Database.Database): void {
   db.pragma('foreign_keys = ON');
   db.exec(KNOWLEDGE_SCHEMA);
 
-  // FTS5 virtual table — external content mode
+  // FTS5 virtual table — external content mode.
+  // Note: knowledge.id is a TEXT UUID, but FTS5 content_rowid uses SQLite's
+  // implicit integer rowid. Hybrid search must JOIN on rowid, not id.
   const ftsExists = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
   ).get();
@@ -245,19 +247,35 @@ export function getKnowledgeByKey(
   return row ? rowToKnowledge(row) : undefined;
 }
 
+export interface ListKnowledgeOpts {
+  type?: KnowledgeType;
+  types?: KnowledgeType[];
+  mutable?: boolean;
+  limit?: number;
+  orderBy?: string;
+}
+
 /**
  * List knowledge rows with optional filtering.
+ * Safe for use with untrusted input — no raw SQL interpolation.
  */
 export function listKnowledge(
   db: Database.Database,
-  opts?: {
-    type?: KnowledgeType;
-    types?: KnowledgeType[];
-    mutable?: boolean;
-    metadataFilter?: string; // SQL fragment for json_extract, e.g. "json_extract(metadata, '$.status') = 'active'"
-    limit?: number;
-    orderBy?: string;
-  },
+  opts?: ListKnowledgeOpts,
+): Knowledge[] {
+  return listKnowledgeInternal(db, opts);
+}
+
+/**
+ * Internal list function that supports raw SQL metadata filters.
+ * ONLY for use by the compiler with hardcoded filter strings — never
+ * expose metadataFilter to user/MCP input (SQL injection risk).
+ *
+ * @internal
+ */
+export function listKnowledgeInternal(
+  db: Database.Database,
+  opts?: ListKnowledgeOpts & { metadataFilter?: string },
 ): Knowledge[] {
   let sql = 'SELECT * FROM knowledge WHERE 1=1';
   const params: unknown[] = [];

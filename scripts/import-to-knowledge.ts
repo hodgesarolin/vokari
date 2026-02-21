@@ -14,7 +14,8 @@
 
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, join, basename, extname } from 'node:path';
+import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import {
   initKnowledge,
   importAllToKnowledge,
@@ -293,9 +294,6 @@ function importContextFiles(
   contextDir: string,
   dryRun: boolean,
 ): number {
-  const { readdirSync, readFileSync, statSync } = require('node:fs');
-  const { join, basename, extname } = require('node:path');
-
   let imported = 0;
 
   try {
@@ -400,7 +398,6 @@ async function main() {
 
   // ── 3. Import context files (if context dir exists next to epistemic) ──
   const contextDir = resolve(config.epistemicPath, '../../data/memory/context');
-  const { existsSync } = require('node:fs');
   if (existsSync(contextDir)) {
     console.log('─── Context Files Import ───');
     const contextImported = importContextFiles(targetDb, contextDir, config.dryRun);

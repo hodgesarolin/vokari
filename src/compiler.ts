@@ -17,6 +17,7 @@
 import type Database from 'better-sqlite3';
 import {
   listKnowledge,
+  listKnowledgeInternal,
   searchKnowledge,
   getKnowledgeByKey,
 } from './knowledge.js';
@@ -24,7 +25,7 @@ import type { KnowledgeType, Knowledge, EmbedFn } from './knowledge.js';
 
 // ── Types ──
 
-export type SessionType = 'interactive' | 'cron_thinking' | 'cron_digest' | 'cron_health';
+export type SessionType = string;
 
 export interface AssembleContextOpts {
   /** Max characters for the assembled context. */
@@ -37,6 +38,8 @@ export interface AssembleContextOpts {
   embedFn?: EmbedFn;
   /** Include section headers in output (default: true). */
   headers?: boolean;
+  /** Custom session layer configs. If provided, overrides the built-in defaults. */
+  sessionLayers?: Record<string, SessionLayerItem[]>;
 }
 
 export interface AssembleContextResult {
@@ -71,16 +74,21 @@ interface LayerEntry {
  * Each entry specifies: type filter, optional key, optional metadata filter,
  * and priority (lower = included first).
  */
-interface SessionLayerItem {
+export interface SessionLayerItem {
   type: KnowledgeType;
   key?: string;
+  /** Raw SQL fragment for json_extract filtering. Only use with hardcoded strings. */
   metadataFilter?: string;
   priority: number;
   header?: string;
   limit?: number;
 }
 
-const SESSION_LAYERS: Record<SessionType, SessionLayerItem[]> = {
+/**
+ * Default session layer configs. These are Brain-specific defaults.
+ * Override by passing `sessionLayers` to `assembleContext()`.
+ */
+export const DEFAULT_SESSION_LAYERS: Record<string, SessionLayerItem[]> = {
   interactive: [
     { type: 'handoff', key: 'interactive-context', priority: 10, header: '## Interactive Session Context' },
     { type: 'context', key: 'family', priority: 20, header: '## Family' },
@@ -123,6 +131,7 @@ export function assembleContext(
     sessionType,
     query,
     headers = true,
+    sessionLayers,
   } = opts;
 
   const includedIds: string[] = [];
@@ -168,7 +177,7 @@ export function assembleContext(
 
   // ── Layer 2: SESSION ──
 
-  const sessionEntries = getSessionLayer(db, sessionType);
+  const sessionEntries = getSessionLayer(db, sessionType, sessionLayers);
   const sessionStart = usedChars;
 
   for (const entry of sessionEntries) {
@@ -250,7 +259,7 @@ function getMandatoryLayer(db: Database.Database): LayerEntry[] {
   const entries: LayerEntry[] = [];
 
   // 1. Active corrections (highest priority)
-  const corrections = listKnowledge(db, {
+  const corrections = listKnowledgeInternal(db, {
     type: 'correction',
     metadataFilter: "json_extract(metadata, '$.graduated_at') IS NULL",
   });
@@ -315,9 +324,14 @@ function getMandatoryLayer(db: Database.Database): LayerEntry[] {
 /**
  * Session layer: varies by session type.
  */
-function getSessionLayer(db: Database.Database, sessionType: SessionType): LayerEntry[] {
+function getSessionLayer(
+  db: Database.Database,
+  sessionType: SessionType,
+  customLayers?: Record<string, SessionLayerItem[]>,
+): LayerEntry[] {
   const entries: LayerEntry[] = [];
-  const layerConfig = SESSION_LAYERS[sessionType] ?? [];
+  const layers = customLayers ?? DEFAULT_SESSION_LAYERS;
+  const layerConfig = layers[sessionType] ?? [];
 
   for (const item of layerConfig) {
     if (item.key) {
@@ -332,8 +346,8 @@ function getSessionLayer(db: Database.Database, sessionType: SessionType): Layer
         });
       }
     } else {
-      // Type-based listing with optional metadata filter
-      const items = listKnowledge(db, {
+      // Type-based listing with optional metadata filter (internal — hardcoded filters only)
+      const items = listKnowledgeInternal(db, {
         type: item.type,
         metadataFilter: item.metadataFilter,
         limit: item.limit ?? 50,

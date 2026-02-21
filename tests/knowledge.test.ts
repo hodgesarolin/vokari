@@ -19,6 +19,7 @@ import {
   importPredictionsToKnowledge,
   importAllToKnowledge,
   importChunksToKnowledge,
+  listKnowledgeInternal,
 } from '../src/knowledge.js';
 import type { KnowledgeType } from '../src/knowledge.js';
 import { initDb } from '../src/db.js';
@@ -192,7 +193,7 @@ describe('listKnowledge', () => {
       metadata: { correction_type: 'policy', permanence: 'never' },
     });
 
-    const policies = listKnowledge(db, {
+    const policies = listKnowledgeInternal(db, {
       type: 'correction',
       metadataFilter: "json_extract(metadata, '$.correction_type') = 'policy'",
     });

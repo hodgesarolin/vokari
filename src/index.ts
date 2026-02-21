@@ -191,6 +191,7 @@ export {
   getKnowledge,
   getKnowledgeByKey,
   listKnowledge,
+  listKnowledgeInternal,
   updateKnowledge,
   upsertKnowledge,
   deleteKnowledge,
@@ -210,16 +211,19 @@ export type {
   Knowledge,
   KnowledgeType,
   AddKnowledgeInput,
+  ListKnowledgeOpts,
   EmbedFn,
 } from './knowledge.js';
 
 // F10 — Context Compiler
 export {
   assembleContext,
+  DEFAULT_SESSION_LAYERS,
 } from './compiler.js';
 
 export type {
   SessionType,
+  SessionLayerItem,
   AssembleContextOpts,
   AssembleContextResult,
 } from './compiler.js';
