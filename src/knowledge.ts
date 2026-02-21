@@ -627,7 +627,7 @@ export function importBeliefsToKnowledge(db: Database.Database): number {
         revision_history: JSON.parse(b.revision_history),
       };
 
-      stmt.run(
+      const result = stmt.run(
         b.id,
         `belief-${b.category}-${b.id.slice(0, 8)}`,
         b.statement,
@@ -635,7 +635,7 @@ export function importBeliefsToKnowledge(db: Database.Database): number {
         b.first_recorded,
         b.last_confirmed ?? b.first_recorded,
       );
-      count++;
+      if (result.changes > 0) count++;
     }
   });
 
@@ -691,7 +691,7 @@ export function importCorrectionsToKnowledge(db: Database.Database): number {
         source: c.source,
       };
 
-      stmt.run(
+      const result = stmt.run(
         c.id,
         `correction-${c.type}-${c.id.slice(0, 8)}`,
         c.content,
@@ -699,7 +699,7 @@ export function importCorrectionsToKnowledge(db: Database.Database): number {
         c.created_at,
         c.last_violated ?? c.created_at,
       );
-      count++;
+      if (result.changes > 0) count++;
     }
   });
 
@@ -756,7 +756,7 @@ export function importPositionsToKnowledge(db: Database.Database): number {
       // Content = topic + position combined for searchability
       const content = `${p.topic}: ${p.position}`;
 
-      stmt.run(
+      const result = stmt.run(
         p.id,
         `position-${p.id.slice(0, 8)}`,
         content,
@@ -764,7 +764,7 @@ export function importPositionsToKnowledge(db: Database.Database): number {
         p.created_at,
         p.last_challenged ?? p.created_at,
       );
-      count++;
+      if (result.changes > 0) count++;
     }
   });
 
@@ -820,7 +820,7 @@ export function importPredictionsToKnowledge(db: Database.Database): number {
 
       const content = `${p.topic}: ${p.prediction}`;
 
-      stmt.run(
+      const result = stmt.run(
         p.id,
         `prediction-${p.domain}-${p.id.slice(0, 8)}`,
         content,
@@ -828,7 +828,7 @@ export function importPredictionsToKnowledge(db: Database.Database): number {
         p.created_at,
         p.resolved_at ?? p.created_at,
       );
-      count++;
+      if (result.changes > 0) count++;
     }
   });
 
@@ -917,7 +917,7 @@ export function importChunksToKnowledge(db: Database.Database): number {
 
       const key = `${chunk.source_file}-chunk-${chunk.chunk_index}`;
 
-      stmt.run(
+      const result = stmt.run(
         id,
         knowledgeType,
         key,
@@ -926,7 +926,7 @@ export function importChunksToKnowledge(db: Database.Database): number {
         chunk.created_at,
         chunk.updated_at,
       );
-      count++;
+      if (result.changes > 0) count++;
     }
   });
 
