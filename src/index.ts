@@ -183,3 +183,52 @@ export type {
   VerificationTickResult,
   VerificationStats,
 } from './verification.js';
+
+// F6+F10 — Unified Knowledge Store
+export {
+  initKnowledge,
+  addKnowledge,
+  getKnowledge,
+  getKnowledgeByKey,
+  listKnowledge,
+  listKnowledgeInternal,
+  updateKnowledge,
+  upsertKnowledge,
+  deleteKnowledge,
+  deleteKnowledgeByType,
+  searchKnowledge,
+  searchKnowledgeHybrid,
+  getKnowledgeStats,
+  importBeliefsToKnowledge,
+  importCorrectionsToKnowledge,
+  importPositionsToKnowledge,
+  importPredictionsToKnowledge,
+  importAllToKnowledge,
+  importChunksToKnowledge,
+  MetadataFilter,
+  OrderBy,
+} from './knowledge.js';
+
+export type {
+  Knowledge,
+  KnowledgeType,
+  AddKnowledgeInput,
+  ListKnowledgeOpts,
+  ListKnowledgeInternalOpts,
+  MetadataFilter as MetadataFilterType,
+  OrderByExpr,
+  EmbedFn,
+} from './knowledge.js';
+
+// F10 — Context Compiler
+export {
+  assembleContext,
+  DEFAULT_SESSION_LAYERS,
+} from './compiler.js';
+
+export type {
+  SessionType,
+  SessionLayerItem,
+  AssembleContextOpts,
+  AssembleContextResult,
+} from './compiler.js';
