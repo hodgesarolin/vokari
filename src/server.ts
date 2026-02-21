@@ -6,6 +6,14 @@ import {
   recordViolation, graduateCorrection, deleteCorrection, getContext, getStats,
 } from './db.js';
 import {
+  initKnowledge, addKnowledge, getKnowledge, getKnowledgeByKey,
+  listKnowledge, updateKnowledge, upsertKnowledge, deleteKnowledge,
+  searchKnowledge, getKnowledgeStats, importAllToKnowledge,
+} from './knowledge.js';
+import type { KnowledgeType } from './knowledge.js';
+import { assembleContext } from './compiler.js';
+import type { SessionType } from './compiler.js';
+import {
   addBelief, getBelief, listBeliefs, checkObservation,
   recordContradiction, confirmBelief, reviseBelief, retireBelief,
   getBeliefContext, getBeliefStats,
@@ -35,6 +43,7 @@ import { extractSignal, buildDigest, DEFAULT_NOISE_PATTERNS, DEFAULT_SIGNAL_PATT
 
 const dbPath = process.env.EPISTEMIC_DB || './epistemic.db';
 const db = initDb(dbPath);
+initKnowledge(db);
 
 const server = new McpServer({
   name: 'epistemic',
@@ -740,6 +749,224 @@ server.resource(
       mimeType: 'text/markdown',
     }],
   }),
+);
+
+// ────────────────────────────────────────────
+// Unified Knowledge Store
+// ────────────────────────────────────────────
+
+const KNOWLEDGE_TYPES = [
+  'belief', 'correction', 'position', 'prediction', 'research',
+  'handoff', 'context', 'archive', 'daily', 'transcript',
+  'session', 'ticket', 'digest',
+] as const;
+
+server.tool(
+  'upsert_knowledge',
+  'Add or update a knowledge entry. For mutable types (handoff, context), overwrites on type+key match. For other types, creates a new entry or updates existing on key match.',
+  {
+    type: z.enum(KNOWLEDGE_TYPES).describe('Content type'),
+    key: z.string().describe('Unique key within type (e.g., "interactive-context", "family")'),
+    content: z.string().describe('The content text'),
+    metadata: z.record(z.string(), z.unknown()).optional().describe('Optional JSON metadata'),
+  },
+  async (params) => {
+    const id = upsertKnowledge(db, {
+      type: params.type as KnowledgeType,
+      key: params.key,
+      content: params.content,
+      metadata: params.metadata as Record<string, unknown>,
+    });
+    const k = getKnowledge(db, id);
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Knowledge upserted: ${id.slice(0, 8)} (${k?.type}/${k?.key})\nMutable: ${k?.mutable}\nContent: ${k?.content.slice(0, 200)}${(k?.content.length ?? 0) > 200 ? '...' : ''}`,
+      }],
+    };
+  },
+);
+
+server.tool(
+  'get_knowledge',
+  'Get a knowledge entry by type and key',
+  {
+    type: z.enum(KNOWLEDGE_TYPES).describe('Content type'),
+    key: z.string().describe('Unique key within type'),
+  },
+  async (params) => {
+    const k = getKnowledgeByKey(db, params.type as KnowledgeType, params.key);
+    if (!k) return { content: [{ type: 'text' as const, text: `Not found: ${params.type}/${params.key}` }] };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `[${k.type}/${k.key}] (${k.mutable ? 'mutable' : 'immutable'})\nUpdated: ${k.updated_at}\nMetadata: ${JSON.stringify(k.metadata).slice(0, 200)}\n\n${k.content}`,
+      }],
+    };
+  },
+);
+
+server.tool(
+  'search_knowledge',
+  'Full-text search across all knowledge types. Uses FTS5 BM25 ranking.',
+  {
+    query: z.string().describe('Search terms'),
+    type: z.enum(KNOWLEDGE_TYPES).optional().describe('Filter by type'),
+    limit: z.number().optional().default(10).describe('Max results'),
+  },
+  async (params) => {
+    const results = searchKnowledge(db, params.query, {
+      type: params.type as KnowledgeType | undefined,
+      limit: params.limit,
+    });
+    if (results.length === 0) return { content: [{ type: 'text' as const, text: 'No results found.' }] };
+    const lines = results.map((r, i) =>
+      `${i + 1}. [${r.type}${r.key ? `/${r.key}` : ''}] ${r.snippet.replace(/<\/?b>/g, '**')}`
+    );
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  },
+);
+
+server.tool(
+  'list_knowledge',
+  'List knowledge entries, optionally filtered by type',
+  {
+    type: z.enum(KNOWLEDGE_TYPES).optional().describe('Filter by type'),
+    mutable: z.boolean().optional().describe('Filter by mutability'),
+    limit: z.number().optional().default(20).describe('Max results'),
+  },
+  async (params) => {
+    const items = listKnowledge(db, {
+      type: params.type as KnowledgeType | undefined,
+      mutable: params.mutable,
+      limit: params.limit,
+    });
+    if (items.length === 0) return { content: [{ type: 'text' as const, text: 'No knowledge entries found.' }] };
+    const lines = items.map(k =>
+      `[${k.id.slice(0, 8)}] ${k.type}${k.key ? `/${k.key}` : ''} (${k.mutable ? 'mutable' : 'immutable'}) — ${k.content.slice(0, 80)}${k.content.length > 80 ? '...' : ''}`
+    );
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  },
+);
+
+server.tool(
+  'assemble_context',
+  'Compile a context window from the knowledge store. Three layers: mandatory (corrections/identity), session (varies by type), relevance (search-based).',
+  {
+    budget: z.number().describe('Max characters for the context window'),
+    session_type: z.enum(['interactive', 'cron_thinking', 'cron_digest', 'cron_health']).describe('Session type determines which knowledge is included'),
+    query: z.string().optional().describe('Optional query for relevance-based retrieval'),
+    headers: z.boolean().optional().default(true).describe('Include section headers'),
+  },
+  async (params) => {
+    const result = assembleContext(db, {
+      budget: params.budget,
+      sessionType: params.session_type as SessionType,
+      query: params.query,
+      headers: params.headers,
+    });
+    const summary = [
+      `Budget: ${result.breakdown.total}/${result.breakdown.budget} chars (${result.breakdown.utilizationPct}%)`,
+      `Mandatory: ${result.breakdown.mandatory} | Session: ${result.breakdown.session} | Relevance: ${result.breakdown.relevance}`,
+      `Included: ${result.includedIds.length} entries | Excluded: ${result.excluded}`,
+      '---',
+      result.context,
+    ].join('\n');
+    return { content: [{ type: 'text' as const, text: summary }] };
+  },
+);
+
+server.tool(
+  'knowledge_stats',
+  'Get statistics about the unified knowledge store',
+  {},
+  async () => {
+    const stats = getKnowledgeStats(db);
+    const types = stats.byType.map(t => `${t.type}: ${t.count}`).join(', ');
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Total: ${stats.total} entries\nMutable: ${stats.mutableCount}\nBy type: ${types || 'none'}`,
+      }],
+    };
+  },
+);
+
+server.tool(
+  'import_to_knowledge',
+  'Import existing beliefs, corrections, positions, and predictions into the unified knowledge store. Safe to run multiple times (uses INSERT OR IGNORE).',
+  {},
+  async () => {
+    const result = importAllToKnowledge(db);
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Imported ${result.total} entries:\n- Beliefs: ${result.beliefs}\n- Corrections: ${result.corrections}\n- Positions: ${result.positions}\n- Predictions: ${result.predictions}`,
+      }],
+    };
+  },
+);
+
+server.tool(
+  'upsert_handoff',
+  'Write or update a handoff document (mutable). Convenience wrapper for upsert_knowledge with type=handoff.',
+  {
+    key: z.string().describe('Handoff key (e.g., "interactive-context", "last-session-handoff", "nightly-state", "daily-todos")'),
+    content: z.string().describe('The handoff content'),
+    metadata: z.record(z.string(), z.unknown()).optional().describe('Optional metadata'),
+  },
+  async (params) => {
+    const id = upsertKnowledge(db, {
+      type: 'handoff',
+      key: params.key,
+      content: params.content,
+      metadata: params.metadata as Record<string, unknown>,
+    });
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Handoff upserted: ${params.key} (${id.slice(0, 8)})\nLength: ${params.content.length} chars`,
+      }],
+    };
+  },
+);
+
+server.tool(
+  'get_handoff',
+  'Read a handoff document by key. Returns the latest content.',
+  {
+    key: z.string().describe('Handoff key'),
+  },
+  async (params) => {
+    const k = getKnowledgeByKey(db, 'handoff', params.key);
+    if (!k) return { content: [{ type: 'text' as const, text: `Handoff not found: ${params.key}` }] };
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `[handoff/${params.key}] Updated: ${k.updated_at}\n\n${k.content}`,
+      }],
+    };
+  },
+);
+
+// Knowledge context resource
+server.resource(
+  'knowledge-context',
+  'epistemic://knowledge',
+  { description: 'Assembled context from unified knowledge store', mimeType: 'text/markdown' },
+  async (uri) => {
+    const result = assembleContext(db, {
+      budget: 50000,
+      sessionType: 'interactive',
+    });
+    return {
+      contents: [{
+        uri: uri.href,
+        text: result.context,
+        mimeType: 'text/markdown',
+      }],
+    };
+  },
 );
 
 // ────────────────────────────────────────────
