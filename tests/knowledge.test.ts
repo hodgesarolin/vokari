@@ -20,6 +20,7 @@ import {
   importAllToKnowledge,
   importChunksToKnowledge,
   listKnowledgeInternal,
+  MetadataFilter,
 } from '../src/knowledge.js';
 import type { KnowledgeType } from '../src/knowledge.js';
 import { initDb } from '../src/db.js';
@@ -195,7 +196,7 @@ describe('listKnowledge', () => {
 
     const policies = listKnowledgeInternal(db, {
       type: 'correction',
-      metadataFilter: "json_extract(metadata, '$.correction_type') = 'policy'",
+      metadataFilter: MetadataFilter('correction_type_policy'),
     });
     expect(policies).toHaveLength(1);
     expect(policies[0].content).toBe('Policy correction');

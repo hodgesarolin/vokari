@@ -38,6 +38,68 @@ export type KnowledgeType =
   | 'ticket'
   | 'digest';
 
+// ── Safe SQL Fragments ──
+// Branded types prevent raw SQL injection. Only pre-registered fragments are allowed.
+// To add a new filter/order, register it in the maps below.
+
+declare const __metadataFilterBrand: unique symbol;
+declare const __orderByBrand: unique symbol;
+
+/** Opaque branded type — can only be created via `MetadataFilter()`. */
+export type MetadataFilter = string & { readonly [__metadataFilterBrand]: true };
+/** Opaque branded type — can only be created via `OrderBy()`. */
+export type OrderByExpr = string & { readonly [__orderByBrand]: true };
+
+/**
+ * Registry of allowed metadata filter SQL fragments.
+ * Keys are semantic names; values are the raw SQL.
+ * Add new entries here when new filters are needed.
+ */
+const METADATA_FILTER_REGISTRY: Record<string, string> = {
+  'not_graduated':       "json_extract(metadata, '$.graduated_at') IS NULL",
+  'outcome_pending':     "json_extract(metadata, '$.outcome') IS NULL",
+  'status_held_or_challenged': "json_extract(metadata, '$.status') IN ('held', 'challenged')",
+  'correction_type_policy': "json_extract(metadata, '$.correction_type') = 'policy'",
+};
+
+/**
+ * Registry of allowed ORDER BY expressions.
+ */
+const ORDER_BY_REGISTRY: Record<string, string> = {
+  'updated_desc':  'updated_at DESC',
+  'updated_asc':   'updated_at ASC',
+  'created_desc':  'created_at DESC',
+  'created_asc':   'created_at ASC',
+};
+
+/**
+ * Create a safe MetadataFilter from a registered name.
+ * Throws if the name is not in the registry.
+ */
+export function MetadataFilter(name: string): MetadataFilter {
+  const sql = METADATA_FILTER_REGISTRY[name];
+  if (!sql) {
+    throw new Error(
+      `Unknown metadata filter: "${name}". Registered filters: ${Object.keys(METADATA_FILTER_REGISTRY).join(', ')}`
+    );
+  }
+  return sql as MetadataFilter;
+}
+
+/**
+ * Create a safe OrderByExpr from a registered name.
+ * Throws if the name is not in the registry.
+ */
+export function OrderBy(name: string): OrderByExpr {
+  const sql = ORDER_BY_REGISTRY[name];
+  if (!sql) {
+    throw new Error(
+      `Unknown order-by expression: "${name}". Registered: ${Object.keys(ORDER_BY_REGISTRY).join(', ')}`
+    );
+  }
+  return sql as OrderByExpr;
+}
+
 export interface KnowledgeRow {
   id: string;
   type: KnowledgeType;
@@ -252,7 +314,15 @@ export interface ListKnowledgeOpts {
   types?: KnowledgeType[];
   mutable?: boolean;
   limit?: number;
-  orderBy?: string;
+  orderBy?: OrderByExpr;
+}
+
+/**
+ * Options for internal list queries that support metadata filtering.
+ * The MetadataFilter branded type ensures only registered SQL fragments are used.
+ */
+export interface ListKnowledgeInternalOpts extends ListKnowledgeOpts {
+  metadataFilter?: MetadataFilter;
 }
 
 /**
@@ -267,15 +337,15 @@ export function listKnowledge(
 }
 
 /**
- * Internal list function that supports raw SQL metadata filters.
- * ONLY for use by the compiler with hardcoded filter strings — never
- * expose metadataFilter to user/MCP input (SQL injection risk).
+ * Internal list function that supports metadata filtering via branded types.
+ * MetadataFilter and OrderByExpr can only be created from registered SQL
+ * fragments, preventing SQL injection at the type level.
  *
  * @internal
  */
 export function listKnowledgeInternal(
   db: Database.Database,
-  opts?: ListKnowledgeOpts & { metadataFilter?: string },
+  opts?: ListKnowledgeInternalOpts,
 ): Knowledge[] {
   let sql = 'SELECT * FROM knowledge WHERE 1=1';
   const params: unknown[] = [];

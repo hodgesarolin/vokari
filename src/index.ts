@@ -205,6 +205,8 @@ export {
   importPredictionsToKnowledge,
   importAllToKnowledge,
   importChunksToKnowledge,
+  MetadataFilter,
+  OrderBy,
 } from './knowledge.js';
 
 export type {
@@ -212,6 +214,9 @@ export type {
   KnowledgeType,
   AddKnowledgeInput,
   ListKnowledgeOpts,
+  ListKnowledgeInternalOpts,
+  MetadataFilter as MetadataFilterType,
+  OrderByExpr,
   EmbedFn,
 } from './knowledge.js';
 

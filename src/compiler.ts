@@ -20,8 +20,10 @@ import {
   listKnowledgeInternal,
   searchKnowledge,
   getKnowledgeByKey,
+  MetadataFilter,
+  OrderBy,
 } from './knowledge.js';
-import type { KnowledgeType, Knowledge, EmbedFn } from './knowledge.js';
+import type { KnowledgeType, Knowledge, EmbedFn, MetadataFilter as MetadataFilterType } from './knowledge.js';
 
 // ── Types ──
 
@@ -77,8 +79,8 @@ interface LayerEntry {
 export interface SessionLayerItem {
   type: KnowledgeType;
   key?: string;
-  /** Raw SQL fragment for json_extract filtering. Only use with hardcoded strings. */
-  metadataFilter?: string;
+  /** Branded metadata filter — must be created via MetadataFilter() from the registry. */
+  metadataFilter?: MetadataFilterType;
   priority: number;
   header?: string;
   limit?: number;
@@ -94,14 +96,14 @@ export const DEFAULT_SESSION_LAYERS: Record<string, SessionLayerItem[]> = {
     { type: 'context', key: 'family', priority: 20, header: '## Family' },
     { type: 'context', key: 'personal', priority: 25, header: '## Personal Context' },
     { type: 'handoff', key: 'daily-todos', priority: 30, header: '## Daily Todos' },
-    { type: 'prediction', priority: 40, header: '## Active Predictions', metadataFilter: "json_extract(metadata, '$.outcome') IS NULL", limit: 20 },
-    { type: 'position', priority: 50, header: '## Active Positions', metadataFilter: "json_extract(metadata, '$.status') IN ('held', 'challenged')", limit: 30 },
+    { type: 'prediction', priority: 40, header: '## Active Predictions', metadataFilter: MetadataFilter('outcome_pending'), limit: 20 },
+    { type: 'position', priority: 50, header: '## Active Positions', metadataFilter: MetadataFilter('status_held_or_challenged'), limit: 30 },
   ],
   cron_thinking: [
     { type: 'handoff', key: 'last-session-handoff', priority: 10, header: '## Last Session Handoff' },
     { type: 'handoff', key: 'nightly-state', priority: 15, header: '## Nightly State' },
-    { type: 'position', priority: 20, header: '## Active Positions', metadataFilter: "json_extract(metadata, '$.status') IN ('held', 'challenged')", limit: 30 },
-    { type: 'prediction', priority: 30, header: '## Active Predictions', metadataFilter: "json_extract(metadata, '$.outcome') IS NULL", limit: 20 },
+    { type: 'position', priority: 20, header: '## Active Positions', metadataFilter: MetadataFilter('status_held_or_challenged'), limit: 30 },
+    { type: 'prediction', priority: 30, header: '## Active Predictions', metadataFilter: MetadataFilter('outcome_pending'), limit: 20 },
   ],
   cron_digest: [
     // Minimal: just corrections (mandatory) + identity + recent events
@@ -216,7 +218,7 @@ export function assembleContext(
     const recentItems = listKnowledge(db, {
       types: ['research', 'context', 'archive', 'daily'],
       limit: 10,
-      orderBy: 'updated_at DESC',
+      orderBy: OrderBy('updated_desc'),
     });
 
     for (const item of recentItems) {
@@ -261,7 +263,7 @@ function getMandatoryLayer(db: Database.Database): LayerEntry[] {
   // 1. Active corrections (highest priority)
   const corrections = listKnowledgeInternal(db, {
     type: 'correction',
-    metadataFilter: "json_extract(metadata, '$.graduated_at') IS NULL",
+    metadataFilter: MetadataFilter('not_graduated'),
   });
 
   if (corrections.length > 0) {
