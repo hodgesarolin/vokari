@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
-import { initPositions, addPosition } from './src/positions.ts';
+import { initPositions, addPosition, listPositions } from './src/positions.ts';
 
-const db = new Database('brain-test.db');
+const dbPath = process.env.EPISTEMIC_DB || './epistemic.db';
+const db = new Database(dbPath);
 initPositions(db);
 
 const positions = [
@@ -31,8 +32,17 @@ const positions = [
   { topic: "Self-correction 5-level spectrum", position: "L0 none → L5 autonomous. 100% of behavioral corrections discovered by Daniel, 0% autonomous. Human oracle irreplaceable.", confidence: 0.75 },
 ];
 
+// Build set of existing topics for idempotent import
+const existing = listPositions(db, {});
+const existingTopics = new Set(existing.map(p => p.topic));
+
 let imported = 0;
+let skipped = 0;
 for (const p of positions) {
+  if (existingTopics.has(p.topic)) {
+    skipped++;
+    continue;
+  }
   try {
     addPosition(db, p);
     imported++;
@@ -41,5 +51,6 @@ for (const p of positions) {
   }
 }
 
-console.log(`Imported ${imported}/${positions.length} positions`);
+console.log(`Imported ${imported}, skipped ${skipped} (already exist), of ${positions.length} positions`);
+console.log(`Total positions in DB: ${existing.length + imported}`);
 db.close();
