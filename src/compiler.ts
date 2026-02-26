@@ -2,16 +2,19 @@
  * Context Compiler for Vokari.
  *
  * Dynamically assembles a context window from the unified knowledge store.
- * Three layers:
+ * Four layers:
  * 1. MANDATORY — always included (corrections, identity, decisions)
- * 2. SESSION — varies by session type (interactive, cron_thinking, cron_digest)
- * 3. RELEVANCE — fills remaining budget via hybrid search (FTS5 + optional vector)
+ * 2. MAINTENANCE — health/status alerts when epistemic items need attention
+ * 3. SESSION — varies by session type (interactive, cron_thinking, cron_digest)
+ * 4. RELEVANCE — fills remaining budget via hybrid search (FTS5 + optional vector)
  *
  * Key properties:
  * - Budget-aware: never exceeds the character limit
  * - Deterministic base: mandatory + session layers are stable (cacheable)
  * - Dynamic tail: relevance layer adapts to the conversation
  * - Source-agnostic: pulls from knowledge table regardless of origin
+ * - Self-maintaining: maintenance layer surfaces overdue verifications,
+ *   pending predictions, and unchallenged positions without cron dependency
  */
 
 import type Database from 'better-sqlite3';
@@ -50,6 +53,7 @@ export interface AssembleContextResult {
   /** Breakdown of how the budget was used. */
   breakdown: {
     mandatory: number;
+    maintenance: number;
     session: number;
     relevance: number;
     total: number;
@@ -60,6 +64,18 @@ export interface AssembleContextResult {
   includedIds: string[];
   /** Number of rows considered but excluded (budget). */
   excluded: number;
+  /** Maintenance items found (even if not included in context due to budget). */
+  maintenanceItems: MaintenanceItems;
+}
+
+/** Counts of epistemic items needing attention. */
+export interface MaintenanceItems {
+  beliefsNeverVerified: number;
+  beliefsStale: number;
+  predictionsPastDue: number;
+  positionsUnchallenged: number;
+  activeContradictions: number;
+  total: number;
 }
 
 interface LayerEntry {
@@ -177,6 +193,19 @@ export function assembleContext(
 
   const mandatorySize = usedChars - mandatoryStart;
 
+  // ── Layer 1.5: MAINTENANCE ──
+
+  const maintenanceItems = getMaintenanceItems(db);
+  const maintenanceStart = usedChars;
+
+  if (maintenanceItems.total > 0) {
+    const maintenanceText = formatMaintenanceSection(maintenanceItems, headers);
+    // Maintenance section is compact — always try to include it
+    tryAdd(maintenanceText, ['_maintenance']);
+  }
+
+  const maintenanceSize = usedChars - maintenanceStart;
+
   // ── Layer 2: SESSION ──
 
   const sessionEntries = getSessionLayer(db, sessionType, sessionLayers);
@@ -240,6 +269,7 @@ export function assembleContext(
     context: sections.join('\n'),
     breakdown: {
       mandatory: mandatorySize,
+      maintenance: maintenanceSize,
       session: sessionSize,
       relevance: relevanceSize,
       total: usedChars,
@@ -248,6 +278,7 @@ export function assembleContext(
     },
     includedIds,
     excluded,
+    maintenanceItems,
   };
 }
 
@@ -374,6 +405,137 @@ function getSessionLayer(
   }
 
   return entries.sort((a, b) => a.priority - b.priority);
+}
+
+// ── Maintenance Layer ──
+
+/**
+ * Read-only health check: counts epistemic items needing attention.
+ * No side effects — does not create verification records or modify state.
+ * Gracefully returns zero counts if epistemic tables don't exist
+ * (e.g., when only the knowledge store is initialized).
+ */
+function getMaintenanceItems(db: Database.Database): MaintenanceItems {
+  const empty: MaintenanceItems = {
+    beliefsNeverVerified: 0,
+    beliefsStale: 0,
+    predictionsPastDue: 0,
+    positionsUnchallenged: 0,
+    activeContradictions: 0,
+    total: 0,
+  };
+
+  /** Safe count query — returns 0 if table doesn't exist. */
+  function safeCount(sql: string): number {
+    try {
+      return (db.prepare(sql).get() as { c: number }).c;
+    } catch {
+      return 0; // Table doesn't exist
+    }
+  }
+
+  // 1. Beliefs never verified
+  const beliefsNeverVerified = safeCount(`
+    SELECT COUNT(*) as c FROM beliefs
+    WHERE status IN ('active', 'challenged')
+      AND last_confirmed IS NULL
+      AND id NOT IN (
+        SELECT DISTINCT belief_id FROM verifications WHERE status = 'completed'
+      )
+  `);
+
+  // 2. Beliefs verified but stale (>7 days since last confirmation)
+  const beliefsStale = safeCount(`
+    SELECT COUNT(*) as c FROM beliefs
+    WHERE status IN ('active', 'challenged')
+      AND last_confirmed IS NOT NULL
+      AND last_confirmed <= datetime('now', '-7 days')
+  `);
+
+  // 3. Predictions past their check date
+  const predictionsPastDue = safeCount(`
+    SELECT COUNT(*) as c FROM predictions
+    WHERE outcome IS NULL
+      AND check_date IS NOT NULL
+      AND check_date <= datetime('now')
+  `);
+
+  // 4. Positions unchallenged for >30 days
+  const positionsUnchallenged = safeCount(`
+    SELECT COUNT(*) as c FROM positions
+    WHERE status IN ('held', 'challenged')
+      AND (
+        last_challenged IS NULL
+        OR last_challenged <= datetime('now', '-30 days')
+      )
+  `);
+
+  // 5. Active contradictions (beliefs with unresolved contradictions)
+  const activeContradictions = safeCount(`
+    SELECT COUNT(*) as c FROM beliefs
+    WHERE status = 'challenged'
+      AND json_array_length(contradictions) > 0
+  `);
+
+  const total = beliefsNeverVerified + beliefsStale + predictionsPastDue
+    + positionsUnchallenged + activeContradictions;
+
+  return {
+    beliefsNeverVerified,
+    beliefsStale,
+    predictionsPastDue,
+    positionsUnchallenged,
+    activeContradictions,
+    total,
+  };
+}
+
+/**
+ * Format maintenance items as a compact context section.
+ * Includes actionable tool call hints so any agent knows how to address items.
+ */
+function formatMaintenanceSection(items: MaintenanceItems, includeHeaders: boolean): string {
+  const lines: string[] = [];
+
+  if (includeHeaders) {
+    lines.push('\n⚠️ **Epistemic Maintenance Needed**');
+  }
+
+  const alerts: string[] = [];
+  if (items.beliefsNeverVerified > 0) {
+    alerts.push(`${items.beliefsNeverVerified} belief${items.beliefsNeverVerified === 1 ? '' : 's'} never verified`);
+  }
+  if (items.beliefsStale > 0) {
+    alerts.push(`${items.beliefsStale} belief${items.beliefsStale === 1 ? '' : 's'} stale (>7d)`);
+  }
+  if (items.predictionsPastDue > 0) {
+    alerts.push(`${items.predictionsPastDue} prediction${items.predictionsPastDue === 1 ? '' : 's'} past check date`);
+  }
+  if (items.positionsUnchallenged > 0) {
+    alerts.push(`${items.positionsUnchallenged} position${items.positionsUnchallenged === 1 ? '' : 's'} unchallenged (>30d)`);
+  }
+  if (items.activeContradictions > 0) {
+    alerts.push(`${items.activeContradictions} active contradiction${items.activeContradictions === 1 ? '' : 's'}`);
+  }
+
+  lines.push(alerts.join(' · '));
+
+  // Add tool hints for resolution
+  const hints: string[] = [];
+  if (items.beliefsNeverVerified > 0 || items.beliefsStale > 0) {
+    hints.push('`verification_tick` to review beliefs');
+  }
+  if (items.predictionsPastDue > 0) {
+    hints.push('`pending_predictions` to resolve predictions');
+  }
+  if (items.positionsUnchallenged > 0) {
+    hints.push('`unchallenged_positions` to challenge positions');
+  }
+  if (hints.length > 0) {
+    lines.push('_Actions: ' + hints.join(', ') + '_');
+  }
+
+  return lines.join('\n');
 }
 
 // ── Formatting ──

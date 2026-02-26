@@ -851,7 +851,7 @@ server.tool(
 
 server.tool(
   'assemble_context',
-  'Compile a context window from the knowledge store. Three layers: mandatory (corrections/identity), session (varies by type), relevance (search-based).',
+  'Compile a context window from the knowledge store. Four layers: mandatory (corrections/identity), maintenance (epistemic health alerts), session (varies by type), relevance (search-based).',
   {
     budget: z.number().describe('Max characters for the context window'),
     session_type: z.enum(['interactive', 'cron_thinking', 'cron_digest', 'cron_health']).describe('Session type determines which knowledge is included'),
@@ -865,9 +865,12 @@ server.tool(
       query: params.query,
       headers: params.headers,
     });
+    const maintenanceNote = result.maintenanceItems.total > 0
+      ? ` | Maintenance: ${result.breakdown.maintenance} (${result.maintenanceItems.total} items)`
+      : '';
     const summary = [
       `Budget: ${result.breakdown.total}/${result.breakdown.budget} chars (${result.breakdown.utilizationPct}%)`,
-      `Mandatory: ${result.breakdown.mandatory} | Session: ${result.breakdown.session} | Relevance: ${result.breakdown.relevance}`,
+      `Mandatory: ${result.breakdown.mandatory} | Session: ${result.breakdown.session} | Relevance: ${result.breakdown.relevance}${maintenanceNote}`,
       `Included: ${result.includedIds.length} entries | Excluded: ${result.excluded}`,
       '---',
       result.context,
