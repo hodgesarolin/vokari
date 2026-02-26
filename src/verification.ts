@@ -159,6 +159,20 @@ export function getVerification(db: Database.Database, id: string): Verification
 }
 
 /**
+ * Reclaim stale in_progress verifications.
+ * If a verification was claimed but never completed (session crashed, LLM didn't follow through),
+ * reset it to pending so the belief can be picked up again.
+ */
+function reclaimStaleVerifications(db: Database.Database, staleClaimHours: number): void {
+  db.prepare(`
+    UPDATE verifications
+    SET status = 'pending', started_at = NULL
+    WHERE status = 'in_progress'
+      AND started_at < datetime('now', ? || ' hours')
+  `).run(`-${staleClaimHours}`);
+}
+
+/**
  * The core tick function. Call this whenever the host has attention budget.
  *
  * 1. Claims any manually-created pending verifications
@@ -174,9 +188,13 @@ export function verificationTick(
   db: Database.Database,
   budget: number = 3,
   cooldownHours: number = 24,
+  staleClaimHours: number = 2,
 ): VerificationTickResult {
   const items: VerificationTickItem[] = [];
   let skipped = 0;
+
+  // Phase 0: Reclaim stale in_progress verifications
+  reclaimStaleVerifications(db, staleClaimHours);
 
   // Phase 1: Claim pending verifications (manually queued)
   const pending = db.prepare(`
@@ -383,6 +401,99 @@ export function skipVerification(
         completed_at = ?
     WHERE id = ?
   `).run(reason ?? null, now, verificationId);
+}
+
+/**
+ * Opportunistic verification: pick one belief that needs review.
+ * Designed to be called as a side effect of any MCP tool call.
+ * Returns a single item to append to tool responses, or null if nothing is due.
+ *
+ * Claims the item (sets in_progress) so it won't be nudged again until
+ * the 2-hour stale reclaim window. The LLM should call record_verification
+ * with the result, or the claim auto-expires.
+ *
+ * @param cooldownHours - Skip beliefs verified within this window
+ * @param staleClaimHours - Reclaim abandoned in_progress items older than this
+ */
+export function opportunisticVerification(
+  db: Database.Database,
+  cooldownHours: number = 24,
+  staleClaimHours: number = 2,
+): { beliefId: string; statement: string; category: string; confidence: number; verificationId: string } | null {
+  // Reclaim stale in_progress verifications (same logic as verificationTick Phase 0)
+  // Reset to pending so the belief can be picked up again — it was never actually reviewed.
+  reclaimStaleVerifications(db, staleClaimHours);
+
+  // Get IDs of beliefs with active verifications or recently verified
+  const excludeIds = new Set<string>();
+
+  // Only exclude beliefs with active (in_progress) verifications.
+  // Pending verifications (from create_verification or stale reclaims) are
+  // handled by verificationTick, not opportunistic — don't block re-selection.
+  const active = db.prepare(`
+    SELECT DISTINCT belief_id FROM verifications
+    WHERE status = 'in_progress'
+  `).all() as Array<{ belief_id: string }>;
+  for (const r of active) excludeIds.add(r.belief_id);
+
+  const recent = db.prepare(`
+    SELECT DISTINCT belief_id FROM verifications
+    WHERE status = 'completed'
+      AND completed_at > datetime('now', ? || ' hours')
+  `).all(`-${cooldownHours}`) as Array<{ belief_id: string }>;
+  for (const r of recent) excludeIds.add(r.belief_id);
+
+  // Pick the highest priority belief
+  const candidates = db.prepare(`
+    SELECT id, statement, category, confidence, status, last_confirmed
+    FROM beliefs
+    WHERE status IN ('active', 'challenged')
+    ORDER BY
+      CASE WHEN last_confirmed IS NULL THEN 0 ELSE 1 END,
+      CASE WHEN status = 'challenged' THEN 0 ELSE 1 END,
+      COALESCE(last_confirmed, '2000-01-01') ASC,
+      confidence DESC
+    LIMIT 20
+  `).all() as Array<{
+    id: string;
+    statement: string;
+    category: string;
+    confidence: number;
+    status: string;
+    last_confirmed: string | null;
+  }>;
+
+  for (const belief of candidates) {
+    if (excludeIds.has(belief.id)) continue;
+
+    // Determine strategy
+    let strategy: VerificationStrategy;
+    if (belief.last_confirmed === null) {
+      strategy = 'never_verified';
+    } else if (belief.status === 'challenged') {
+      strategy = 'challenged';
+    } else {
+      strategy = 'staleness';
+    }
+
+    // Create a verification record (claimed immediately)
+    const vid = randomUUID();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO verifications (id, belief_id, strategy, status, started_at)
+      VALUES (?, ?, ?, 'in_progress', ?)
+    `).run(vid, belief.id, strategy, now);
+
+    return {
+      beliefId: belief.id,
+      statement: belief.statement,
+      category: belief.category,
+      confidence: belief.confidence,
+      verificationId: vid,
+    };
+  }
+
+  return null;
 }
 
 /**
