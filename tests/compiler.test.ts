@@ -522,3 +522,139 @@ describe('session type differentiation', () => {
     expect(digest.breakdown.session).toBeLessThan(interactive.breakdown.session);
   });
 });
+
+describe('maintenance layer', () => {
+  /** Create epistemic tables needed for maintenance checks. */
+  function createEpistemicTables(testDb: Database.Database): void {
+    testDb.exec(`
+      CREATE TABLE IF NOT EXISTS beliefs (
+        id TEXT PRIMARY KEY,
+        statement TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'world',
+        confidence REAL NOT NULL DEFAULT 0.7,
+        status TEXT NOT NULL DEFAULT 'active',
+        first_recorded TEXT NOT NULL DEFAULT (datetime('now')),
+        last_confirmed TEXT,
+        contradictions TEXT NOT NULL DEFAULT '[]',
+        evidence TEXT NOT NULL DEFAULT '[]',
+        tags TEXT NOT NULL DEFAULT '[]',
+        source TEXT
+      );
+      CREATE TABLE IF NOT EXISTS verifications (
+        id TEXT PRIMARY KEY,
+        belief_id TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        outcome TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        started_at TEXT,
+        completed_at TEXT,
+        notes TEXT,
+        evidence TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE TABLE IF NOT EXISTS predictions (
+        id TEXT PRIMARY KEY,
+        topic TEXT NOT NULL,
+        prediction TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        domain TEXT NOT NULL DEFAULT 'general',
+        check_date TEXT,
+        outcome TEXT,
+        reasoning TEXT,
+        resolution_criteria TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT,
+        notes TEXT
+      );
+      CREATE TABLE IF NOT EXISTS positions (
+        id TEXT PRIMARY KEY,
+        topic TEXT NOT NULL,
+        position TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        status TEXT NOT NULL DEFAULT 'held',
+        challenge_count INTEGER NOT NULL DEFAULT 0,
+        last_challenged TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        revision_history TEXT NOT NULL DEFAULT '[]',
+        evidence TEXT NOT NULL DEFAULT '[]',
+        counterevidence TEXT NOT NULL DEFAULT '[]',
+        reasoning TEXT
+      );
+    `);
+  }
+
+  it('returns zero maintenance items when epistemic tables do not exist', () => {
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.total).toBe(0);
+    expect(result.breakdown.maintenance).toBe(0);
+  });
+
+  it('returns zero maintenance items when epistemic tables are empty', () => {
+    createEpistemicTables(db);
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.total).toBe(0);
+    expect(result.breakdown.maintenance).toBe(0);
+  });
+
+  it('surfaces beliefs never verified', () => {
+    createEpistemicTables(db);
+    db.prepare(`
+      INSERT INTO beliefs (id, statement, category, confidence, status, first_recorded)
+      VALUES ('b1', 'Test belief', 'world', 0.7, 'active', datetime('now'))
+    `).run();
+
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.beliefsNeverVerified).toBe(1);
+    expect(result.maintenanceItems.total).toBeGreaterThan(0);
+    expect(result.breakdown.maintenance).toBeGreaterThan(0);
+    expect(result.context).toContain('never verified');
+    expect(result.context).toContain('verification_tick');
+  });
+
+  it('surfaces predictions past check date', () => {
+    createEpistemicTables(db);
+    db.prepare(`
+      INSERT INTO predictions (id, topic, prediction, confidence, domain, check_date)
+      VALUES ('p1', 'Test', 'Something will happen', 0.7, 'general', datetime('now', '-1 day'))
+    `).run();
+
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.predictionsPastDue).toBe(1);
+    expect(result.context).toContain('past check date');
+    expect(result.context).toContain('pending_predictions');
+  });
+
+  it('surfaces unchallenged positions', () => {
+    createEpistemicTables(db);
+    db.prepare(`
+      INSERT INTO positions (id, topic, position, confidence, status, created_at)
+      VALUES ('pos1', 'Test topic', 'Test position', 0.7, 'held', datetime('now', '-60 days'))
+    `).run();
+
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.positionsUnchallenged).toBe(1);
+    expect(result.context).toContain('unchallenged');
+    expect(result.context).toContain('unchallenged_positions');
+  });
+
+  it('surfaces active contradictions', () => {
+    createEpistemicTables(db);
+    db.prepare(`
+      INSERT INTO beliefs (id, statement, category, confidence, status, first_recorded, contradictions)
+      VALUES ('b2', 'Challenged belief', 'world', 0.8, 'challenged', datetime('now'), '["some contradiction"]')
+    `).run();
+
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.activeContradictions).toBe(1);
+    expect(result.context).toContain('contradiction');
+  });
+
+  it('does not include maintenance section when nothing needs attention', () => {
+    createEpistemicTables(db);
+    // Tables exist but are empty — nothing needs attention
+    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    expect(result.maintenanceItems.total).toBe(0);
+    expect(result.breakdown.maintenance).toBe(0);
+    expect(result.context).not.toContain('Maintenance');
+  });
+});

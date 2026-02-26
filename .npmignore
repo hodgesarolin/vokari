@@ -1,0 +1,10 @@
+src/
+tests/
+scripts/
+*.db
+*.db-shm
+*.db-wal
+tsconfig.json
+vitest.config.ts
+import-positions.ts
+.github/

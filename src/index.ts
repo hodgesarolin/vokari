@@ -231,4 +231,5 @@ export type {
   SessionLayerItem,
   AssembleContextOpts,
   AssembleContextResult,
+  MaintenanceItems,
 } from './compiler.js';
