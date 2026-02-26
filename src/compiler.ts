@@ -201,7 +201,7 @@ export function assembleContext(
   if (maintenanceItems.total > 0) {
     const maintenanceText = formatMaintenanceSection(maintenanceItems, headers);
     // Maintenance section is compact — always try to include it
-    tryAdd(maintenanceText, ['_maintenance']);
+    tryAdd(maintenanceText, []);
   }
 
   const maintenanceSize = usedChars - maintenanceStart;

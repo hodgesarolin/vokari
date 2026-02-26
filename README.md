@@ -91,7 +91,7 @@ Store mistakes with DPO-ready training pairs. Inject active corrections into eve
 | `delete_correction` | Remove permanently |
 | `correction_stats` | Overview statistics |
 
-```
+```text
 You: "correct" → type: "fact", content: "User's school is PS 28, NOT PS 27"
 AI gets it right next time. And every time after.
 ```
@@ -122,7 +122,7 @@ Make predictions with explicit confidence levels, resolution criteria, and check
 | `pending_predictions` | Get predictions due for review |
 | `calibration` | Full report: accuracy, Brier score, bias analysis |
 
-```
+```text
 You: "predict" → "PR will merge by Thursday" (70% confidence)
 Thursday: "resolve_prediction" → correct
 After 20+ predictions: "calibration" → Brier: 0.15, accuracy: 83%
@@ -212,7 +212,7 @@ Unified storage with 12 content types, FTS5 full-text search, and a context comp
 
 ## Architecture
 
-```
+```text
 ┌──────────────────────────────────────────┐
 │              MCP Client                   │
 │  (Claude Desktop, Cursor, custom agent)   │
