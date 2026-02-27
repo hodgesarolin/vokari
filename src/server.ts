@@ -36,6 +36,7 @@ import { analyzeCycling, analyzeAttentionBudget } from './metacognition.js';
 import {
   verificationTick, createVerification, recordVerification,
   skipVerification, verificationStatus, getBeliefVerifications,
+  opportunisticVerification,
 } from './verification.js';
 import type { VerificationOutcome, VerificationStrategy } from './verification.js';
 import type { AttentionCategory } from './metacognition.js';
@@ -47,14 +48,111 @@ initKnowledge(db);
 
 const server = new McpServer({
   name: 'epistemic',
-  version: '0.2.0', // F1-F9 feature extraction
+  version: '0.2.1', // Opportunistic verification on every tool call
 });
+
+// ────────────────────────────────────────────
+// Opportunistic verification wrapper
+// ────────────────────────────────────────────
+
+/**
+ * Cooldown between opportunistic verification nudges (in hours).
+ * Controls how often a verification prompt is appended to tool responses.
+ * Set to 0 to nudge on every call; higher values reduce noise.
+ */
+const OPPORTUNISTIC_COOLDOWN_HOURS = 24;
+
+/**
+ * Minimum interval between opportunistic nudges (ms).
+ * Prevents flooding if tools are called rapidly in sequence.
+ */
+const OPPORTUNISTIC_MIN_INTERVAL_MS = 60_000; // 1 minute
+let lastOpportunisticNudge = 0;
+
+/**
+ * Tools that should NOT trigger opportunistic verification.
+ * Verification tools themselves, to avoid recursive nudging.
+ */
+const VERIFICATION_TOOLS = new Set([
+  'verification_tick', 'create_verification', 'record_verification',
+  'skip_verification', 'verification_status',
+]);
+
+/**
+ * Append an opportunistic verification nudge to a tool response.
+ * Called after every non-verification tool handler.
+ */
+function appendVerificationNudge(
+  result: { content: Array<{ type: 'text'; text: string }> },
+): { content: Array<{ type: 'text'; text: string }> } {
+  const now = Date.now();
+  if (now - lastOpportunisticNudge < OPPORTUNISTIC_MIN_INTERVAL_MS) {
+    return result;
+  }
+
+  try {
+    const item = opportunisticVerification(db, OPPORTUNISTIC_COOLDOWN_HOURS);
+    if (!item) return result;
+
+    lastOpportunisticNudge = now;
+
+    const nudge = [
+      '',
+      '---',
+      `🔍 **Verification check** [${item.verificationId.slice(0, 8)}]: "${item.statement}"`,
+      `   Category: ${item.category} | Confidence: ${Math.round(item.confidence * 100)}%`,
+      `   → Is this still accurate? Call \`record_verification("${item.verificationId}", outcome)\` with confirmed/revised/contradicted/inconclusive.`,
+    ].join('\n');
+
+    // Append to the last text content block
+    const lastContent = result.content[result.content.length - 1];
+    if (lastContent && lastContent.type === 'text') {
+      lastContent.text += nudge;
+    }
+  } catch {
+    // Never let verification errors break tool responses
+  }
+
+  return result;
+}
+
+// ────────────────────────────────────────────
+// Wrapped tool registration
+// ────────────────────────────────────────────
+
+/**
+ * Register a tool with opportunistic verification appended to responses.
+ * Verification tools are excluded to avoid recursion.
+ *
+ * Uses server.tool.bind() to wrap the SDK's tool registration.
+ * Depends on McpServer.tool() accepting (name, description, schema, handler).
+ * Tested against @modelcontextprotocol/sdk ^1.26.0.
+ */
+const _registerTool = server.tool.bind(server);
+
+function tool(
+  name: string,
+  description: string,
+  schema: Parameters<typeof server.tool>[2],
+  handler: (...args: any[]) => Promise<{ content: Array<{ type: 'text'; text: string }> }>,
+): void {
+  if (VERIFICATION_TOOLS.has(name)) {
+    // Register without wrapper
+    _registerTool(name, description, schema, handler);
+  } else {
+    // Register with verification nudge
+    _registerTool(name, description, schema, async (...args: any[]) => {
+      const result = await handler(...args);
+      return appendVerificationNudge(result);
+    });
+  }
+}
 
 // ────────────────────────────────────────────
 // F9 — Corrections
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'correct',
   'Store a correction — something the AI got wrong and how to do it right',
   {
@@ -75,7 +173,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'get_context',
   'Get formatted corrections for system prompt injection, priority-ordered within a character budget',
   {
@@ -87,7 +185,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'list_corrections',
   'List all corrections, optionally filtered by type',
   {
@@ -105,7 +203,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'record_violation',
   'Record that a correction was violated — resets streak, increments count',
   { id: z.string().describe('Correction ID') },
@@ -117,7 +215,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'graduate_correction',
   'Retire a correction that is no longer needed (graduable only)',
   { id: z.string().describe('Correction ID') },
@@ -130,7 +228,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'delete_correction',
   'Permanently delete a correction',
   { id: z.string().describe('Correction ID') },
@@ -142,7 +240,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'correction_stats',
   'Get correction store statistics',
   {},
@@ -162,7 +260,7 @@ server.tool(
 // F1 — Beliefs
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'add_belief',
   'Record a belief about the user, system, world, or self',
   {
@@ -180,7 +278,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'list_beliefs',
   'List beliefs, optionally filtered by category or status',
   {
@@ -205,7 +303,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'check_observation',
   'Check an observation against existing beliefs for matches and contradictions',
   {
@@ -232,7 +330,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'contradict_belief',
   'Record a contradiction against a belief',
   {
@@ -247,7 +345,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'confirm_belief',
   'Confirm a belief with optional new evidence',
   {
@@ -261,7 +359,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'revise_belief',
   'Revise a belief with a new statement',
   {
@@ -277,7 +375,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'belief_context',
   'Get formatted beliefs for system prompt injection',
   { budget: z.number().optional().default(4000) },
@@ -287,7 +385,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'belief_stats',
   'Get belief store statistics',
   {},
@@ -313,7 +411,7 @@ server.tool(
 // F9 — Predictions
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'predict',
   'Make a prediction with confidence level and check date',
   {
@@ -332,7 +430,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'resolve_prediction',
   'Resolve a prediction as correct, incorrect, partial, or voided',
   {
@@ -346,7 +444,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'pending_predictions',
   'Get predictions due for review',
   {},
@@ -359,7 +457,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'calibration',
   'Get prediction calibration report — accuracy, Brier score, bias analysis',
   {},
@@ -373,7 +471,7 @@ server.tool(
 // F9 — Positions
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'add_position',
   'Record an epistemic position on a topic',
   {
@@ -390,7 +488,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'challenge_position',
   'Challenge an existing position — increments challenge count',
   { id: z.string().describe('Position ID') },
@@ -400,7 +498,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'revise_position',
   'Revise an existing position with a new stance',
   {
@@ -415,7 +513,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'position_context',
   'Get formatted positions for system prompt injection',
   { budget: z.number().optional().default(4000) },
@@ -425,7 +523,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'unchallenged_positions',
   'Get positions that haven\'t been challenged in N days',
   { days: z.number().optional().default(30) },
@@ -442,7 +540,7 @@ server.tool(
 // F7 — Events & Awareness
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'log_event',
   'Log an event to the session event stream',
   {
@@ -456,7 +554,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'awareness',
   'Get awareness context — active sessions, recent completions',
   {
@@ -474,7 +572,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'event_stats',
   'Get event stream statistics',
   {},
@@ -489,7 +587,7 @@ server.tool(
 // F2 — Learning (conversation analysis)
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'analyze_conversation',
   'Extract beliefs, topics, corrections, and URLs from conversation messages',
   {
@@ -503,7 +601,7 @@ server.tool(
     const beliefs = extractLearningBeliefs(params.messages, params.session_id);
     const topics = extractTopics(params.messages);
     const corrections = extractLearningCorrections(params.messages);
-    const allText = params.messages.map(m => m.content).join('\n');
+    const allText = params.messages.map((m: { role: string; content: string }) => m.content).join('\n');
     const urls = extractUrls(allText);
 
     const parts: string[] = [];
@@ -531,7 +629,7 @@ server.tool(
 // F3+F4 — Metacognition
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'check_cycling',
   'Analyze entries for cycling/repetitive thinking patterns',
   {
@@ -560,7 +658,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'check_attention',
   'Analyze attention budget across entries against priority categories',
   {
@@ -601,7 +699,7 @@ server.tool(
 // F5 — Distillation
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'distill',
   'Extract signal from noise in log content',
   {
@@ -618,7 +716,7 @@ server.tool(
 // F9 — Adversarial Verification
 // ────────────────────────────────────────────
 
-server.tool(
+tool(
   'verification_tick',
   'Get beliefs due for adversarial review. Call this whenever you have attention budget. Returns prioritized items — verify them, then call record_verification with results.',
   {
@@ -641,7 +739,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'create_verification',
   'Manually queue a specific belief for adversarial review',
   {
@@ -654,7 +752,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'record_verification',
   'Record the result of an adversarial review. Call after verification_tick returns items and you have challenged the belief.',
   {
@@ -670,7 +768,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'skip_verification',
   'Skip a verification that cannot be completed (e.g., belief retired, insufficient context). Releases the item so the belief can be picked up again after cooldown.',
   {
@@ -683,7 +781,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'verification_status',
   'Get adversarial verification statistics — coverage, outcomes, staleness',
   {},
@@ -761,7 +859,7 @@ const KNOWLEDGE_TYPES = [
   'session', 'ticket', 'digest',
 ] as const;
 
-server.tool(
+tool(
   'upsert_knowledge',
   'Add or update a knowledge entry. For mutable types (handoff, context), overwrites on type+key match. For other types, creates a new entry or updates existing on key match.',
   {
@@ -787,7 +885,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'get_knowledge',
   'Get a knowledge entry by type and key',
   {
@@ -806,7 +904,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'search_knowledge',
   'Full-text search across all knowledge types. Uses FTS5 BM25 ranking.',
   {
@@ -827,7 +925,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'list_knowledge',
   'List knowledge entries, optionally filtered by type',
   {
@@ -849,7 +947,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'assemble_context',
   'Compile a context window from the knowledge store. Four layers: mandatory (corrections/identity), maintenance (epistemic health alerts), session (varies by type), relevance (search-based).',
   {
@@ -879,7 +977,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'knowledge_stats',
   'Get statistics about the unified knowledge store',
   {},
@@ -895,7 +993,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'import_to_knowledge',
   'Import existing beliefs, corrections, positions, and predictions into the unified knowledge store. Safe to run multiple times (uses INSERT OR IGNORE).',
   {},
@@ -910,7 +1008,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'upsert_handoff',
   'Write or update a handoff document (mutable). Convenience wrapper for upsert_knowledge with type=handoff.',
   {
@@ -934,7 +1032,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'get_handoff',
   'Read a handoff document by key. Returns the latest content.',
   {

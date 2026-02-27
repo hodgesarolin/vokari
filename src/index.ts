@@ -168,6 +168,7 @@ export {
   createVerification,
   getVerification,
   verificationTick,
+  opportunisticVerification,
   recordVerification,
   skipVerification,
   getBeliefVerifications,

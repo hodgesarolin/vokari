@@ -7,6 +7,7 @@ import {
   createVerification,
   getVerification,
   verificationTick,
+  opportunisticVerification,
   recordVerification,
   skipVerification,
   getBeliefVerifications,
@@ -534,5 +535,151 @@ describe('full verification cycle', () => {
     const r2 = verificationTick(db, 5, 24);
     const ids = r2.items.map(i => i.belief_id);
     expect(ids).toContain(beliefId);
+  });
+});
+
+// ── Stale Claim Recovery ──
+
+describe('stale claim recovery', () => {
+  it('reclaims in_progress verifications older than staleClaimHours', () => {
+    const beliefId = addTestBelief('stale belief');
+
+    // Claim it via tick
+    const r1 = verificationTick(db, 1);
+    expect(r1.items).toHaveLength(1);
+    const vid = r1.items[0].verification_id;
+
+    // Verify it's in_progress
+    const v1 = getVerification(db, vid);
+    expect(v1!.status).toBe('in_progress');
+
+    // Simulate stale claim (started 3 hours ago)
+    db.prepare(`
+      UPDATE verifications SET started_at = datetime('now', '-3 hours') WHERE id = ?
+    `).run(vid);
+
+    // Next tick should reclaim it (default staleClaimHours = 2)
+    const r2 = verificationTick(db, 1);
+    expect(r2.items).toHaveLength(1);
+    expect(r2.items[0].belief_id).toBe(beliefId);
+  });
+
+  it('does not reclaim fresh in_progress verifications', () => {
+    const b1 = addTestBelief('belief one');
+    const b2 = addTestBelief('belief two');
+
+    // Claim belief one (fresh — started just now)
+    const r1 = verificationTick(db, 1);
+    expect(r1.items).toHaveLength(1);
+
+    // Next tick should NOT reclaim the fresh one, should pick belief two instead
+    const r2 = verificationTick(db, 1);
+    expect(r2.items).toHaveLength(1);
+    expect(r2.items[0].belief_id).toBe(b2);
+  });
+
+  it('respects custom staleClaimHours parameter', () => {
+    const beliefId = addTestBelief('custom stale');
+
+    // Claim it
+    verificationTick(db, 1);
+
+    // Simulate 30 minutes old
+    db.prepare(`
+      UPDATE verifications SET started_at = datetime('now', '-30 minutes') WHERE belief_id = ?
+    `).run(beliefId);
+
+    // With staleClaimHours = 0.25 (15 minutes), should reclaim
+    const r2 = verificationTick(db, 1, 24, 0.25);
+    expect(r2.items).toHaveLength(1);
+    expect(r2.items[0].belief_id).toBe(beliefId);
+  });
+});
+
+// ── Opportunistic Verification ──
+
+describe('opportunisticVerification', () => {
+  it('returns a belief that needs verification', () => {
+    addTestBelief('test belief for opportunistic');
+
+    const item = opportunisticVerification(db);
+    expect(item).not.toBeNull();
+    expect(item!.statement).toBe('test belief for opportunistic');
+    expect(item!.verificationId).toBeDefined();
+    expect(item!.beliefId).toBeDefined();
+  });
+
+  it('returns null when no beliefs exist', () => {
+    const item = opportunisticVerification(db);
+    expect(item).toBeNull();
+  });
+
+  it('returns null when all beliefs were recently verified', () => {
+    const beliefId = addTestBelief('recently verified');
+
+    // Verify it
+    const item1 = opportunisticVerification(db, 24);
+    expect(item1).not.toBeNull();
+    recordVerification(db, item1!.verificationId, 'confirmed');
+
+    // Should return null within cooldown
+    const item2 = opportunisticVerification(db, 24);
+    expect(item2).toBeNull();
+  });
+
+  it('creates an in_progress verification record', () => {
+    addTestBelief('tracked belief');
+
+    const item = opportunisticVerification(db);
+    expect(item).not.toBeNull();
+
+    const v = getVerification(db, item!.verificationId);
+    expect(v).toBeDefined();
+    expect(v!.status).toBe('in_progress');
+  });
+
+  it('skips beliefs with active verifications', () => {
+    const b1 = addTestBelief('first');
+    const b2 = addTestBelief('second');
+
+    // First call picks highest priority
+    const item1 = opportunisticVerification(db);
+    expect(item1).not.toBeNull();
+
+    // Second call should pick the other belief
+    const item2 = opportunisticVerification(db);
+    expect(item2).not.toBeNull();
+    expect(item2!.beliefId).not.toBe(item1!.beliefId);
+  });
+
+  it('reclaims stale in_progress before picking new beliefs', () => {
+    const beliefId = addTestBelief('only belief');
+
+    // First call claims it
+    const item1 = opportunisticVerification(db);
+    expect(item1).not.toBeNull();
+
+    // Simulate stale (3 hours old)
+    db.prepare(`
+      UPDATE verifications SET started_at = datetime('now', '-3 hours') WHERE id = ?
+    `).run(item1!.verificationId);
+
+    // Should reclaim and re-pick the same belief
+    const item2 = opportunisticVerification(db);
+    expect(item2).not.toBeNull();
+    expect(item2!.beliefId).toBe(beliefId);
+    // New verification ID (old one was reset to pending, this is a new claim)
+    expect(item2!.verificationId).not.toBe(item1!.verificationId);
+  });
+
+  it('prioritizes never-verified over stale', () => {
+    // Verified belief (stale)
+    const b1 = addTestBelief('verified but stale', { lastConfirmed: '2020-01-01' });
+    // Never verified belief
+    const b2 = addTestBelief('never verified');
+
+    const item = opportunisticVerification(db);
+    expect(item).not.toBeNull();
+    expect(item!.beliefId).toBe(b2);
   });
 });
