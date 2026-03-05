@@ -20,6 +20,14 @@ import { randomUUID } from 'crypto';
 
 export type BeliefCategory = 'user' | 'system' | 'world' | 'self';
 export type BeliefStatus = 'active' | 'challenged' | 'revised' | 'retired';
+export type BeliefSensitivity = 'personal' | 'institutional' | 'approximate';
+
+/** Numeric contradiction thresholds by sensitivity level. */
+export const SENSITIVITY_THRESHOLDS: Record<BeliefSensitivity, number> = {
+  personal: 1.05,       // 5% — income, ages, dates
+  institutional: 1.10,  // 10% — school stats, market rates
+  approximate: 1.15,    // 15% — population, general stats (default)
+};
 
 export interface Contradiction {
   observation: string;
@@ -39,6 +47,7 @@ export interface Belief {
   statement: string;
   category: BeliefCategory;
   confidence: number;
+  sensitivity: BeliefSensitivity;
   source: string;
   evidence: string[];
   tags: string[];
@@ -55,6 +64,7 @@ interface BeliefRow {
   statement: string;
   category: BeliefCategory;
   confidence: number;
+  sensitivity: BeliefSensitivity;
   source: string;
   evidence: string;
   tags: string;
@@ -69,6 +79,7 @@ export interface AddBeliefInput {
   statement: string;
   category?: BeliefCategory;
   confidence?: number;
+  sensitivity?: BeliefSensitivity;
   source?: string;
   evidence?: string[];
   tags?: string[];
@@ -115,6 +126,7 @@ const SCHEMA = `
     statement TEXT NOT NULL,
     category TEXT DEFAULT 'world' CHECK (category IN ('user', 'system', 'world', 'self')),
     confidence REAL DEFAULT 0.7 CHECK (confidence >= 0 AND confidence <= 1),
+    sensitivity TEXT DEFAULT 'approximate' CHECK (sensitivity IN ('personal', 'institutional', 'approximate')),
     source TEXT DEFAULT 'observation',
     evidence TEXT DEFAULT '[]',
     tags TEXT DEFAULT '[]',
@@ -125,6 +137,11 @@ const SCHEMA = `
     revision_history TEXT DEFAULT '[]'
   );
 `;
+
+const MIGRATIONS = [
+  // Add sensitivity column if it doesn't exist (for existing databases)
+  `ALTER TABLE beliefs ADD COLUMN sensitivity TEXT DEFAULT 'approximate' CHECK (sensitivity IN ('personal', 'institutional', 'approximate'))`,
+];
 
 // ── Helpers ──
 
@@ -150,10 +167,19 @@ const STOP_WORDS = new Set([
 // ── Core Functions ──
 
 /**
- * Initialize the beliefs table.
+ * Initialize the beliefs table and run any pending migrations.
  */
 export function initBeliefs(db: Database.Database): void {
   db.exec(SCHEMA);
+
+  // Run migrations for existing databases
+  for (const migration of MIGRATIONS) {
+    try {
+      db.exec(migration);
+    } catch {
+      // Column/constraint already exists — safe to ignore
+    }
+  }
 }
 
 /**
@@ -165,13 +191,14 @@ export function addBelief(db: Database.Database, input: AddBeliefInput): string 
   const confidence = Math.max(0, Math.min(1, input.confidence ?? 0.7));
 
   db.prepare(`
-    INSERT INTO beliefs (id, statement, category, confidence, source, evidence, tags)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO beliefs (id, statement, category, confidence, sensitivity, source, evidence, tags)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.statement,
     input.category ?? 'world',
     confidence,
+    input.sensitivity ?? 'approximate',
     input.source ?? 'observation',
     JSON.stringify(input.evidence ?? []),
     JSON.stringify(input.tags ?? []),
@@ -273,9 +300,13 @@ export function checkObservation(
     if (relevance >= 0.2) {
       matches.push({ belief, relevance });
 
-      // Check for contradiction signals
+      // Check for contradiction signals (use belief's sensitivity for threshold)
       const hasNegation = containsNegation(observation, belief.statement);
-      const hasConflicting = hasConflictingNumericValues(observation, belief.statement);
+      const hasConflicting = hasConflictingNumericValues(
+        observation,
+        belief.statement,
+        belief.sensitivity,
+      );
 
       if (hasNegation || hasConflicting) {
         contradictions.push({
@@ -576,9 +607,19 @@ export function containsNegation(observation: string, beliefStatement: string): 
 
 /**
  * Check if observation and belief contain conflicting numeric values.
- * Extracts numbers (with optional $, ~, K/M/B suffixes) and checks for >15% difference.
+ * Extracts numbers (with optional $, ~, K/M/B suffixes) and checks against
+ * the sensitivity threshold.
+ *
+ * @param sensitivity Controls how tight the comparison is:
+ *   - 'personal' (5%): for income, ages, dates — catches $105 vs $96
+ *   - 'institutional' (10%): for school stats, market rates
+ *   - 'approximate' (15%, default): for population, general stats
  */
-export function hasConflictingNumericValues(observation: string, beliefStatement: string): boolean {
+export function hasConflictingNumericValues(
+  observation: string,
+  beliefStatement: string,
+  sensitivity: BeliefSensitivity = 'approximate',
+): boolean {
   const numPattern = /[$~]?\d[\d,]*\.?\d*[KMB]?/gi;
 
   const obsNums = observation.match(numPattern);
@@ -594,7 +635,8 @@ export function hasConflictingNumericValues(observation: string, beliefStatement
     const min = Math.min(obsClean[0], belClean[0]);
     if (min === 0) return obsClean[0] !== belClean[0];
     const ratio = Math.max(obsClean[0], belClean[0]) / min;
-    return ratio > 1.15; // >15% difference
+    const threshold = SENSITIVITY_THRESHOLDS[sensitivity];
+    return ratio > threshold;
   }
 
   return false;

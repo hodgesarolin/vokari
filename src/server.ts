@@ -267,6 +267,7 @@ tool(
     statement: z.string().describe('The belief statement'),
     category: z.enum(['user', 'system', 'world', 'self']).optional().describe('Category (default: world)'),
     confidence: z.number().min(0).max(1).optional().describe('Confidence 0-1 (default: 0.7)'),
+    sensitivity: z.enum(['personal', 'institutional', 'approximate']).optional().describe('Numeric contradiction sensitivity: personal (5%), institutional (10%), approximate (15%, default)'),
     source: z.string().optional().describe('Where this belief came from'),
     evidence: z.array(z.string()).optional().describe('Supporting evidence'),
     tags: z.array(z.string()).optional().describe('Tags for filtering'),
@@ -274,7 +275,7 @@ tool(
   async (params) => {
     const id = addBelief(db, params);
     const belief = getBelief(db, id);
-    return { content: [{ type: 'text' as const, text: `Belief stored: ${id}\n\n${belief?.category}: ${belief?.statement} (${Math.round((belief?.confidence ?? 0) * 100)}%)` }] };
+    return { content: [{ type: 'text' as const, text: `Belief stored: ${id}\n\n${belief?.category}: ${belief?.statement} (${Math.round((belief?.confidence ?? 0) * 100)}%, sensitivity: ${belief?.sensitivity ?? 'approximate'})` }] };
   },
 );
 

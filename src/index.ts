@@ -31,12 +31,17 @@ export {
   retireBelief,
   getBeliefContext,
   getBeliefStats,
+  SENSITIVITY_THRESHOLDS,
+  hasConflictingNumericValues,
+  containsNegation,
+  parseApproxNumber,
 } from './beliefs.js';
 
 export type {
   Belief,
   BeliefCategory,
   BeliefStatus,
+  BeliefSensitivity,
   AddBeliefInput,
   ListBeliefsOpts,
   CheckObservationResult,
