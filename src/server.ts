@@ -41,6 +41,7 @@ import {
 import type { VerificationOutcome, VerificationStrategy } from './verification.js';
 import type { AttentionCategory } from './metacognition.js';
 import { extractSignal, buildDigest, DEFAULT_NOISE_PATTERNS, DEFAULT_SIGNAL_PATTERNS } from './distill.js';
+import { compileDigest } from './digest.js';
 
 const dbPath = process.env.EPISTEMIC_DB || './epistemic.db';
 const db = initDb(dbPath);
@@ -710,6 +711,37 @@ tool(
   async (params) => {
     const digest = buildDigest(params.title, params.content, DEFAULT_NOISE_PATTERNS, DEFAULT_SIGNAL_PATTERNS);
     return { content: [{ type: 'text' as const, text: digest }] };
+  },
+);
+
+// ────────────────────────────────────────────
+// L2.5 — Epistemic Digest
+// ────────────────────────────────────────────
+
+tool(
+  'compile_digest',
+  'Compile an epistemic digest — a human-readable summary of changes to beliefs, predictions, corrections, positions, and knowledge over a given time period. No LLM needed — pure SQL + string templates.',
+  {
+    since: z.string().optional().describe('ISO date string — include changes since this date (default: 24 hours ago)'),
+    budget: z.number().optional().default(5000).describe('Maximum characters for the digest (default: 5000)'),
+    include_calibration: z.boolean().optional().default(true).describe('Include calibration stats (default: true)'),
+  },
+  async (params) => {
+    const result = compileDigest(db, {
+      since: params.since,
+      budget: params.budget,
+      includeCalibration: params.include_calibration,
+    });
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          digest: result.digest,
+          stats: result.stats,
+          source_count: result.sources.length,
+        }, null, 2),
+      }],
+    };
   },
 );
 

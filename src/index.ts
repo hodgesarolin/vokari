@@ -128,6 +128,10 @@ export type {
   AwarenessOpts,
 } from './awareness.js';
 
+// L2.5 — Epistemic Digest
+export { compileDigest } from './digest.js';
+export type { DigestOpts, DigestResult, DigestStats } from './digest.js';
+
 // F2 — Learning
 export {
   extractUrls,
