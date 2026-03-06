@@ -15,6 +15,7 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { resolveId } from './db.js';
 
 // ── Types ──
 
@@ -211,7 +212,9 @@ export function addBelief(db: Database.Database, input: AddBeliefInput): string 
  * Get a single belief by ID, with JSON fields parsed.
  */
 export function getBelief(db: Database.Database, id: string): Belief | undefined {
-  const row = db.prepare('SELECT * FROM beliefs WHERE id = ?').get(id) as BeliefRow | undefined;
+  const resolved = resolveId(db, 'beliefs', id);
+  if (!resolved) return undefined;
+  const row = db.prepare('SELECT * FROM beliefs WHERE id = ?').get(resolved) as BeliefRow | undefined;
   return row ? rowToBelief(row) : undefined;
 }
 
@@ -360,10 +363,10 @@ export function recordContradiction(
   `).run(
     JSON.stringify(updatedContradictions),
     newStatus,
-    beliefId,
+    belief.id,
   );
 
-  return getBelief(db, beliefId);
+  return getBelief(db, belief.id);
 }
 
 /**
@@ -399,10 +402,10 @@ export function confirmBelief(
     JSON.stringify(updatedEvidence),
     newStatus,
     newConfidence,
-    beliefId,
+    belief.id,
   );
 
-  return getBelief(db, beliefId);
+  return getBelief(db, belief.id);
 }
 
 /**
@@ -444,10 +447,10 @@ export function reviseBelief(
     newStatement,
     confidence,
     JSON.stringify(updatedHistory),
-    beliefId,
+    belief.id,
   );
 
-  return getBelief(db, beliefId);
+  return getBelief(db, belief.id);
 }
 
 /**
@@ -477,10 +480,10 @@ export function retireBelief(
     WHERE id = ?
   `).run(
     JSON.stringify(updatedHistory),
-    beliefId,
+    belief.id,
   );
 
-  return getBelief(db, beliefId);
+  return getBelief(db, belief.id);
 }
 
 /**

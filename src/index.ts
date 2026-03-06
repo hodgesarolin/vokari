@@ -1,6 +1,7 @@
 // F9 — Corrections (self-verification)
 export {
   initDb,
+  resolveId,
   addCorrection,
   getCorrection,
   listCorrections,

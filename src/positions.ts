@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { resolveId } from './db.js';
 
 export type PositionStatus = 'held' | 'challenged' | 'revised' | 'abandoned';
 
@@ -82,7 +83,9 @@ export function addPosition(db: Database.Database, input: AddPositionInput): str
 }
 
 export function getPosition(db: Database.Database, id: string): Position | undefined {
-  return db.prepare('SELECT * FROM positions WHERE id = ?').get(id) as Position | undefined;
+  const resolved = resolveId(db, 'positions', id);
+  if (!resolved) return undefined;
+  return db.prepare('SELECT * FROM positions WHERE id = ?').get(resolved) as Position | undefined;
 }
 
 export function listPositions(db: Database.Database, opts?: ListPositionsOpts): Position[] {
@@ -99,13 +102,15 @@ export function listPositions(db: Database.Database, opts?: ListPositionsOpts): 
 }
 
 export function challengePosition(db: Database.Database, id: string): void {
+  const resolved = resolveId(db, 'positions', id);
+  if (!resolved) return;
   db.prepare(`
     UPDATE positions
     SET challenge_count = challenge_count + 1,
         last_challenged = datetime('now'),
         status = 'challenged'
     WHERE id = ?
-  `).run(id);
+  `).run(resolved);
 }
 
 export function revisePosition(
@@ -136,7 +141,7 @@ export function revisePosition(
         revision_history = ?,
         status = 'held'
     WHERE id = ?
-  `).run(newPosition, newConfidence, JSON.stringify(history), id);
+  `).run(newPosition, newConfidence, JSON.stringify(history), current.id);
 }
 
 export function abandonPosition(db: Database.Database, id: string, reason: string): void {
@@ -159,7 +164,7 @@ export function abandonPosition(db: Database.Database, id: string, reason: strin
     SET status = 'abandoned',
         revision_history = ?
     WHERE id = ?
-  `).run(JSON.stringify(history), id);
+  `).run(JSON.stringify(history), current.id);
 }
 
 export function getUnchallenged(db: Database.Database, days: number = 30): Position[] {

@@ -614,3 +614,48 @@ describe('parseApproxNumber', () => {
     expect(parseApproxNumber('abc')).toBe(0);
   });
 });
+
+describe('prefix ID resolution', () => {
+  it('getBelief resolves 8-char prefix', () => {
+    const id = addBelief(db, { statement: 'Prefix test belief' });
+    const prefix = id.slice(0, 8);
+    const b = getBelief(db, prefix);
+    expect(b).toBeDefined();
+    expect(b!.id).toBe(id);
+    expect(b!.statement).toBe('Prefix test belief');
+  });
+
+  it('confirmBelief works with prefix', () => {
+    const id = addBelief(db, { statement: 'Confirm prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = confirmBelief(db, prefix, 'prefix evidence');
+    expect(result).toBeDefined();
+    expect(result!.last_confirmed).toBeTruthy();
+    expect(result!.evidence).toContain('prefix evidence');
+  });
+
+  it('recordContradiction works with prefix', () => {
+    const id = addBelief(db, { statement: 'Contradict prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = recordContradiction(db, prefix, 'contradicting observation');
+    expect(result).toBeDefined();
+    expect(result!.contradictions).toHaveLength(1);
+  });
+
+  it('reviseBelief works with prefix', () => {
+    const id = addBelief(db, { statement: 'Revise prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = reviseBelief(db, prefix, 'Revised statement', 'testing prefix');
+    expect(result).toBeDefined();
+    expect(result!.statement).toBe('Revised statement');
+    expect(result!.revision_history).toHaveLength(1);
+  });
+
+  it('retireBelief works with prefix', () => {
+    const id = addBelief(db, { statement: 'Retire prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = retireBelief(db, prefix, 'testing prefix retirement');
+    expect(result).toBeDefined();
+    expect(result!.status).toBe('retired');
+  });
+});
