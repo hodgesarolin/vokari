@@ -23,7 +23,7 @@ import {
   resolvePrediction, getPendingReview, getCalibration,
 } from './predictions.js';
 import {
-  addPosition, listPositions, challengePosition,
+  addPosition, getPosition, listPositions, challengePosition,
   revisePosition, abandonPosition, getUnchallenged, getPositionContext,
 } from './positions.js';
 import { calibrationReport } from './calibration.js';
@@ -34,13 +34,14 @@ import { compileAwarenessContext } from './awareness.js';
 import { extractBeliefs as extractLearningBeliefs, extractTopics, extractCorrections as extractLearningCorrections, extractUrls } from './learning.js';
 import { analyzeCycling, analyzeAttentionBudget } from './metacognition.js';
 import {
-  verificationTick, createVerification, recordVerification,
+  verificationTick, createVerification, getVerification, recordVerification,
   skipVerification, verificationStatus, getBeliefVerifications,
   opportunisticVerification,
 } from './verification.js';
 import type { VerificationOutcome, VerificationStrategy } from './verification.js';
 import type { AttentionCategory } from './metacognition.js';
 import { extractSignal, buildDigest, DEFAULT_NOISE_PATTERNS, DEFAULT_SIGNAL_PATTERNS } from './distill.js';
+import { compileDigest } from './digest.js';
 
 const dbPath = process.env.EPISTEMIC_DB || './epistemic.db';
 const db = initDb(dbPath);
@@ -267,6 +268,7 @@ tool(
     statement: z.string().describe('The belief statement'),
     category: z.enum(['user', 'system', 'world', 'self']).optional().describe('Category (default: world)'),
     confidence: z.number().min(0).max(1).optional().describe('Confidence 0-1 (default: 0.7)'),
+    sensitivity: z.enum(['personal', 'institutional', 'approximate']).optional().describe('Numeric contradiction sensitivity: personal (5%), institutional (10%), approximate (15%, default)'),
     source: z.string().optional().describe('Where this belief came from'),
     evidence: z.array(z.string()).optional().describe('Supporting evidence'),
     tags: z.array(z.string()).optional().describe('Tags for filtering'),
@@ -274,7 +276,7 @@ tool(
   async (params) => {
     const id = addBelief(db, params);
     const belief = getBelief(db, id);
-    return { content: [{ type: 'text' as const, text: `Belief stored: ${id}\n\n${belief?.category}: ${belief?.statement} (${Math.round((belief?.confidence ?? 0) * 100)}%)` }] };
+    return { content: [{ type: 'text' as const, text: `Belief stored: ${id}\n\n${belief?.category}: ${belief?.statement} (${Math.round((belief?.confidence ?? 0) * 100)}%, sensitivity: ${belief?.sensitivity ?? 'approximate'})` }] };
   },
 );
 
@@ -439,8 +441,10 @@ tool(
     notes: z.string().optional().describe('Resolution notes'),
   },
   async (params) => {
-    resolvePrediction(db, params.id, params.outcome, params.notes);
-    return { content: [{ type: 'text' as const, text: `Prediction ${params.id.slice(0, 8)} resolved as: ${params.outcome}` }] };
+    const prediction = getPrediction(db, params.id);
+    if (!prediction) return { content: [{ type: 'text' as const, text: `Prediction not found: ${params.id}` }] };
+    resolvePrediction(db, prediction.id, params.outcome, params.notes);
+    return { content: [{ type: 'text' as const, text: `Prediction ${prediction.id.slice(0, 8)} resolved as: ${params.outcome}` }] };
   },
 );
 
@@ -493,8 +497,10 @@ tool(
   'Challenge an existing position — increments challenge count',
   { id: z.string().describe('Position ID') },
   async (params) => {
-    challengePosition(db, params.id);
-    return { content: [{ type: 'text' as const, text: `Position ${params.id.slice(0, 8)} challenged.` }] };
+    const position = getPosition(db, params.id);
+    if (!position) return { content: [{ type: 'text' as const, text: `Position not found: ${params.id}` }] };
+    challengePosition(db, position.id);
+    return { content: [{ type: 'text' as const, text: `Position ${position.id.slice(0, 8)} challenged.` }] };
   },
 );
 
@@ -713,6 +719,29 @@ tool(
 );
 
 // ────────────────────────────────────────────
+// L2.5 — Epistemic Digest
+// ────────────────────────────────────────────
+
+tool(
+  'compile_digest',
+  'Compile an epistemic digest — a human-readable summary of changes to beliefs, predictions, corrections, positions, and knowledge over a given time period. No LLM needed — pure SQL + string templates.',
+  {
+    since: z.string().optional().describe('ISO date string — include changes since this date (default: 24 hours ago)'),
+    budget: z.number().optional().default(5000).describe('Maximum characters for the digest (default: 5000)'),
+    include_calibration: z.boolean().optional().default(true).describe('Include calibration stats (default: true)'),
+  },
+  async (params) => {
+    const result = compileDigest(db, {
+      since: params.since,
+      budget: params.budget,
+      includeCalibration: params.include_calibration,
+    });
+    const summary = `${result.digest}\n\n---\nStats: ${result.stats.totalChanges} changes (${result.sources.length} sources)`;
+    return { content: [{ type: 'text' as const, text: summary }] };
+  },
+);
+
+// ────────────────────────────────────────────
 // F9 — Adversarial Verification
 // ────────────────────────────────────────────
 
@@ -748,6 +777,7 @@ tool(
   },
   async (params) => {
     const id = createVerification(db, params.belief_id, params.strategy as VerificationStrategy);
+    if (!id) return { content: [{ type: 'text' as const, text: `Belief not found: ${params.belief_id}` }] };
     return { content: [{ type: 'text' as const, text: `Verification queued: ${id.slice(0, 8)} for belief ${params.belief_id.slice(0, 8)}` }] };
   },
 );
@@ -776,8 +806,10 @@ tool(
     reason: z.string().optional().describe('Why the verification was skipped'),
   },
   async (params) => {
-    skipVerification(db, params.verification_id, params.reason);
-    return { content: [{ type: 'text' as const, text: `Verification ${params.verification_id.slice(0, 8)} skipped${params.reason ? `: ${params.reason}` : ''}` }] };
+    const v = getVerification(db, params.verification_id);
+    if (!v) return { content: [{ type: 'text' as const, text: `Verification not found: ${params.verification_id}` }] };
+    skipVerification(db, v.id, params.reason);
+    return { content: [{ type: 'text' as const, text: `Verification ${v.id.slice(0, 8)} skipped${params.reason ? `: ${params.reason}` : ''}` }] };
   },
 );
 

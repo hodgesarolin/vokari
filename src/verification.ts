@@ -16,6 +16,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import type { Belief } from './beliefs.js';
+import { resolveId } from './db.js';
 
 // ── Types ──
 
@@ -132,12 +133,16 @@ export function createVerification(
   db: Database.Database,
   beliefId: string,
   strategy: VerificationStrategy = 'manual',
-): string {
+): string | undefined {
+  // Resolve the belief ID (supports prefix matching)
+  const resolvedBeliefId = resolveId(db, 'beliefs', beliefId);
+  if (!resolvedBeliefId) return undefined;
+
   // Check for existing pending/in_progress verification for this belief
   const existing = db.prepare(`
     SELECT id FROM verifications
     WHERE belief_id = ? AND status IN ('pending', 'in_progress')
-  `).get(beliefId) as { id: string } | undefined;
+  `).get(resolvedBeliefId) as { id: string } | undefined;
 
   if (existing) return existing.id;
 
@@ -145,7 +150,7 @@ export function createVerification(
   db.prepare(`
     INSERT INTO verifications (id, belief_id, strategy)
     VALUES (?, ?, ?)
-  `).run(id, beliefId, strategy);
+  `).run(id, resolvedBeliefId, strategy);
 
   return id;
 }
@@ -154,7 +159,9 @@ export function createVerification(
  * Get a single verification by ID.
  */
 export function getVerification(db: Database.Database, id: string): Verification | undefined {
-  const row = db.prepare('SELECT * FROM verifications WHERE id = ?').get(id) as VerificationRow | undefined;
+  const resolved = resolveId(db, 'verifications', id);
+  if (!resolved) return undefined;
+  const row = db.prepare('SELECT * FROM verifications WHERE id = ?').get(resolved) as VerificationRow | undefined;
   return row ? rowToVerification(row) : undefined;
 }
 
@@ -366,7 +373,7 @@ export function recordVerification(
     JSON.stringify(evidence ?? []),
     notes ?? null,
     now,
-    verificationId,
+    verification.id,
   );
 
   // If confirmed, also confirm the belief (updates last_confirmed)
@@ -382,7 +389,7 @@ export function recordVerification(
     `).run(now, evidenceStr, verification.belief_id);
   }
 
-  return getVerification(db, verificationId);
+  return getVerification(db, verification.id);
 }
 
 /**
@@ -393,6 +400,8 @@ export function skipVerification(
   verificationId: string,
   reason?: string,
 ): void {
+  const resolved = resolveId(db, 'verifications', verificationId);
+  if (!resolved) return;
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE verifications
@@ -400,7 +409,7 @@ export function skipVerification(
         notes = ?,
         completed_at = ?
     WHERE id = ?
-  `).run(reason ?? null, now, verificationId);
+  `).run(reason ?? null, now, resolved);
 }
 
 /**
@@ -503,11 +512,13 @@ export function getBeliefVerifications(
   db: Database.Database,
   beliefId: string,
 ): Verification[] {
+  const resolved = resolveId(db, 'beliefs', beliefId);
+  if (!resolved) return [];
   const rows = db.prepare(`
     SELECT * FROM verifications
     WHERE belief_id = ?
     ORDER BY created_at DESC
-  `).all(beliefId) as VerificationRow[];
+  `).all(resolved) as VerificationRow[];
   return rows.map(rowToVerification);
 }
 

@@ -15,7 +15,9 @@ import {
   containsNegation,
   hasConflictingNumericValues,
   parseApproxNumber,
+  SENSITIVITY_THRESHOLDS,
 } from '../src/beliefs.js';
+import type { BeliefSensitivity } from '../src/beliefs.js';
 
 let db: Database.Database;
 
@@ -90,6 +92,21 @@ describe('addBelief', () => {
 
     const low = addBelief(db, { statement: 'Too low', confidence: -0.3 });
     expect(getBelief(db, low)!.confidence).toBe(0);
+  });
+
+  it('defaults sensitivity to approximate', () => {
+    const id = addBelief(db, { statement: 'Test' });
+    expect(getBelief(db, id)!.sensitivity).toBe('approximate');
+  });
+
+  it('stores custom sensitivity', () => {
+    const id = addBelief(db, { statement: 'Kim earns $105/hr', sensitivity: 'personal' });
+    expect(getBelief(db, id)!.sensitivity).toBe('personal');
+  });
+
+  it('stores institutional sensitivity', () => {
+    const id = addBelief(db, { statement: 'PS 28 has 918 students', sensitivity: 'institutional' });
+    expect(getBelief(db, id)!.sensitivity).toBe('institutional');
   });
 });
 
@@ -179,6 +196,21 @@ describe('checkObservation', () => {
     const result = checkObservation(db, 'Server costs about $800 monthly');
     expect(result.contradictions.length).toBeGreaterThan(0);
     expect(result.contradictions[0].reason).toBe('conflicting_values');
+  });
+
+  it('uses belief sensitivity for numeric contradiction threshold', () => {
+    // $105 vs $96 = 9.4% — should be caught with personal sensitivity
+    addBelief(db, { statement: 'Kim hourly income rate about $96', sensitivity: 'personal' });
+    const result = checkObservation(db, 'Kim hourly income rate about $105');
+    expect(result.contradictions.length).toBeGreaterThan(0);
+    expect(result.contradictions[0].reason).toBe('conflicting_values');
+  });
+
+  it('does not flag small differences at approximate sensitivity', () => {
+    // Same values but with approximate (default) sensitivity — should NOT be caught
+    addBelief(db, { statement: 'Server costs about $96 monthly' });
+    const result = checkObservation(db, 'Server costs about $105 monthly');
+    expect(result.contradictions).toHaveLength(0);
   });
 
   it('filters by category', () => {
@@ -519,6 +551,34 @@ describe('hasConflictingNumericValues', () => {
   it('returns false when both are zero', () => {
     expect(hasConflictingNumericValues('Count is 0', 'Count is 0')).toBe(false);
   });
+
+  // Sensitivity-aware threshold tests (BRAIN-116)
+  it('catches 9.4% difference at personal sensitivity (5% threshold)', () => {
+    // Kim's income: $105 vs $96 = 9.4% difference — should be caught at personal
+    expect(hasConflictingNumericValues('Income is $105', 'Income is $96', 'personal')).toBe(true);
+  });
+
+  it('misses 9.4% difference at approximate sensitivity (15% threshold)', () => {
+    // Same values at default threshold — should NOT be caught
+    expect(hasConflictingNumericValues('Income is $105', 'Income is $96', 'approximate')).toBe(false);
+  });
+
+  it('catches 9.4% at institutional sensitivity (10% threshold)', () => {
+    expect(hasConflictingNumericValues('Income is $105', 'Income is $96', 'institutional')).toBe(false);
+    // 10% threshold: ratio 1.09375 < 1.10 — just under, so false
+  });
+
+  it('catches 12% difference at institutional sensitivity', () => {
+    // 112 vs 100 = 12% — should be caught at institutional (10%)
+    expect(hasConflictingNumericValues('Count is 112', 'Count is 100', 'institutional')).toBe(true);
+  });
+
+  it('defaults to approximate (15%) when no sensitivity given', () => {
+    // 14% difference — should NOT be caught with default
+    expect(hasConflictingNumericValues('Population is 1140', 'Population is 1000')).toBe(false);
+    // 16% difference — SHOULD be caught
+    expect(hasConflictingNumericValues('Population is 1160', 'Population is 1000')).toBe(true);
+  });
 });
 
 describe('parseApproxNumber', () => {
@@ -552,5 +612,50 @@ describe('parseApproxNumber', () => {
 
   it('returns 0 for non-numeric input', () => {
     expect(parseApproxNumber('abc')).toBe(0);
+  });
+});
+
+describe('prefix ID resolution', () => {
+  it('getBelief resolves 8-char prefix', () => {
+    const id = addBelief(db, { statement: 'Prefix test belief' });
+    const prefix = id.slice(0, 8);
+    const b = getBelief(db, prefix);
+    expect(b).toBeDefined();
+    expect(b!.id).toBe(id);
+    expect(b!.statement).toBe('Prefix test belief');
+  });
+
+  it('confirmBelief works with prefix', () => {
+    const id = addBelief(db, { statement: 'Confirm prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = confirmBelief(db, prefix, 'prefix evidence');
+    expect(result).toBeDefined();
+    expect(result!.last_confirmed).toBeTruthy();
+    expect(result!.evidence).toContain('prefix evidence');
+  });
+
+  it('recordContradiction works with prefix', () => {
+    const id = addBelief(db, { statement: 'Contradict prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = recordContradiction(db, prefix, 'contradicting observation');
+    expect(result).toBeDefined();
+    expect(result!.contradictions).toHaveLength(1);
+  });
+
+  it('reviseBelief works with prefix', () => {
+    const id = addBelief(db, { statement: 'Revise prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = reviseBelief(db, prefix, 'Revised statement', 'testing prefix');
+    expect(result).toBeDefined();
+    expect(result!.statement).toBe('Revised statement');
+    expect(result!.revision_history).toHaveLength(1);
+  });
+
+  it('retireBelief works with prefix', () => {
+    const id = addBelief(db, { statement: 'Retire prefix test' });
+    const prefix = id.slice(0, 8);
+    const result = retireBelief(db, prefix, 'testing prefix retirement');
+    expect(result).toBeDefined();
+    expect(result!.status).toBe('retired');
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   initDb,
+  resolveId,
   addCorrection,
   getCorrection,
   listCorrections,
@@ -229,5 +230,69 @@ describe('getStats', () => {
     expect(s.total).toBe(0);
     expect(s.active).toBe(0);
     expect(s.total_violations).toBe(0);
+  });
+});
+
+describe('resolveId', () => {
+  it('resolves exact full UUID', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Test' });
+    expect(resolveId(db, 'corrections', id)).toBe(id);
+  });
+
+  it('resolves 8-char prefix to full UUID', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Test' });
+    const prefix = id.slice(0, 8);
+    expect(resolveId(db, 'corrections', prefix)).toBe(id);
+  });
+
+  it('returns undefined for non-existent ID', () => {
+    expect(resolveId(db, 'corrections', 'nonexistent')).toBeUndefined();
+  });
+
+  it('returns undefined for ambiguous prefix', () => {
+    // Insert two corrections with manually crafted IDs sharing a prefix
+    db.prepare(`INSERT INTO corrections (id, type, content) VALUES (?, 'fact', 'A')`).run('aaaaaaaa-1111-2222-3333-444444444444');
+    db.prepare(`INSERT INTO corrections (id, type, content) VALUES (?, 'fact', 'B')`).run('aaaaaaaa-5555-6666-7777-888888888888');
+    // 8-char prefix 'aaaaaaaa' matches both — should return undefined
+    expect(resolveId(db, 'corrections', 'aaaaaaaa')).toBeUndefined();
+  });
+
+  it('does not prefix-match when input contains hyphens', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Test' });
+    // A partial UUID with hyphens should only match exactly
+    const partial = id.slice(0, 13); // e.g. 'xxxxxxxx-xxxx'
+    expect(resolveId(db, 'corrections', partial)).toBeUndefined();
+  });
+
+  it('works with getCorrection for prefix lookup', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Prefix test' });
+    const prefix = id.slice(0, 8);
+    const c = getCorrection(db, prefix);
+    expect(c).toBeDefined();
+    expect(c!.id).toBe(id);
+    expect(c!.content).toBe('Prefix test');
+  });
+
+  it('works with recordViolation using prefix', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Violation prefix test' });
+    const prefix = id.slice(0, 8);
+    recordViolation(db, prefix);
+    const c = getCorrection(db, id)!;
+    expect(c.violation_count).toBe(1);
+  });
+
+  it('works with graduateCorrection using prefix', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Graduate prefix test', permanence: 'graduable' });
+    const prefix = id.slice(0, 8);
+    graduateCorrection(db, prefix);
+    const c = getCorrection(db, id)!;
+    expect(c.graduated_at).toBeTruthy();
+  });
+
+  it('works with deleteCorrection using prefix', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Delete prefix test' });
+    const prefix = id.slice(0, 8);
+    deleteCorrection(db, prefix);
+    expect(getCorrection(db, id)).toBeUndefined();
   });
 });

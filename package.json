@@ -1,6 +1,6 @@
 {
   "name": "@vokari/epistemic",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Epistemic engine for AI assistants — beliefs, predictions, corrections, calibration, awareness, and context injection via MCP",
   "type": "module",
   "main": "dist/index.js",

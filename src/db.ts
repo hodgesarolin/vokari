@@ -56,6 +56,34 @@ const SCHEMA = `
   );
 `;
 
+/**
+ * Resolve a potentially truncated ID to a full UUID.
+ * Supports exact match (fast path) and prefix matching for truncated IDs
+ * (e.g., 8-char prefixes from list_* tool display).
+ *
+ * Returns the full ID if exactly one match found, undefined otherwise.
+ */
+const VALID_TABLES = new Set([
+  'beliefs', 'corrections', 'predictions', 'positions', 'verifications', 'knowledge',
+]);
+
+export function resolveId(db: Database.Database, table: string, id: string): string | undefined {
+  if (!VALID_TABLES.has(table)) throw new Error(`resolveId: invalid table "${table}"`);
+  if (!id || id.length < 8) return undefined;
+
+  // Fast path: exact match (full UUID)
+  const exact = db.prepare(`SELECT id FROM "${table}" WHERE id = ?`).get(id) as { id: string } | undefined;
+  if (exact) return exact.id;
+
+  // Prefix match: only if input looks truncated (no hyphens = likely prefix)
+  if (!id.includes('-')) {
+    const rows = db.prepare(`SELECT id FROM "${table}" WHERE id LIKE ? LIMIT 2`).all(`${id}%`) as { id: string }[];
+    if (rows.length === 1) return rows[0].id;
+  }
+
+  return undefined;
+}
+
 export function initDb(path: string): Database.Database {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
@@ -87,7 +115,9 @@ export function addCorrection(db: Database.Database, input: AddCorrectionInput):
 }
 
 export function getCorrection(db: Database.Database, id: string): Correction | undefined {
-  return db.prepare('SELECT * FROM corrections WHERE id = ?').get(id) as Correction | undefined;
+  const resolved = resolveId(db, 'corrections', id);
+  if (!resolved) return undefined;
+  return db.prepare('SELECT * FROM corrections WHERE id = ?').get(resolved) as Correction | undefined;
 }
 
 export function listCorrections(db: Database.Database, opts?: {
@@ -110,25 +140,31 @@ export function listCorrections(db: Database.Database, opts?: {
 }
 
 export function recordViolation(db: Database.Database, id: string): void {
+  const resolved = resolveId(db, 'corrections', id);
+  if (!resolved) return;
   db.prepare(`
     UPDATE corrections
     SET last_violated = datetime('now'),
         violation_count = violation_count + 1,
         streak_days = 0
     WHERE id = ?
-  `).run(id);
+  `).run(resolved);
 }
 
 export function graduateCorrection(db: Database.Database, id: string): void {
+  const resolved = resolveId(db, 'corrections', id);
+  if (!resolved) return;
   db.prepare(`
     UPDATE corrections
     SET graduated_at = datetime('now')
     WHERE id = ? AND permanence = 'graduable'
-  `).run(id);
+  `).run(resolved);
 }
 
 export function deleteCorrection(db: Database.Database, id: string): void {
-  db.prepare('DELETE FROM corrections WHERE id = ?').run(id);
+  const resolved = resolveId(db, 'corrections', id);
+  if (!resolved) return;
+  db.prepare('DELETE FROM corrections WHERE id = ?').run(resolved);
 }
 
 /**

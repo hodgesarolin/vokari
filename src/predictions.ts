@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { resolveId } from './db.js';
 
 export type Domain = 'political' | 'technical' | 'behavioral' | 'market' | 'general';
 export type Outcome = 'correct' | 'incorrect' | 'partial' | 'voided';
@@ -103,7 +104,9 @@ export function addPrediction(db: Database.Database, input: AddPredictionInput):
 }
 
 export function getPrediction(db: Database.Database, id: string): Prediction | undefined {
-  return db.prepare('SELECT * FROM predictions WHERE id = ?').get(id) as Prediction | undefined;
+  const resolved = resolveId(db, 'predictions', id);
+  if (!resolved) return undefined;
+  return db.prepare('SELECT * FROM predictions WHERE id = ?').get(resolved) as Prediction | undefined;
 }
 
 export function listPredictions(db: Database.Database, opts?: ListPredictionsOpts): Prediction[] {
@@ -130,13 +133,15 @@ export function resolvePrediction(
   outcome: Outcome,
   notes?: string,
 ): void {
+  const resolved = resolveId(db, 'predictions', id);
+  if (!resolved) return;
   db.prepare(`
     UPDATE predictions
     SET outcome = ?,
         outcome_notes = ?,
         resolved_at = datetime('now')
     WHERE id = ?
-  `).run(outcome, notes ?? null, id);
+  `).run(outcome, notes ?? null, resolved);
 }
 
 export function getPendingReview(db: Database.Database): Prediction[] {

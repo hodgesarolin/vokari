@@ -1,6 +1,7 @@
 // F9 — Corrections (self-verification)
 export {
   initDb,
+  resolveId,
   addCorrection,
   getCorrection,
   listCorrections,
@@ -31,12 +32,17 @@ export {
   retireBelief,
   getBeliefContext,
   getBeliefStats,
+  SENSITIVITY_THRESHOLDS,
+  hasConflictingNumericValues,
+  containsNegation,
+  parseApproxNumber,
 } from './beliefs.js';
 
 export type {
   Belief,
   BeliefCategory,
   BeliefStatus,
+  BeliefSensitivity,
   AddBeliefInput,
   ListBeliefsOpts,
   CheckObservationResult,
@@ -122,6 +128,10 @@ export {
 export type {
   AwarenessOpts,
 } from './awareness.js';
+
+// L2.5 — Epistemic Digest
+export { compileDigest } from './digest.js';
+export type { DigestOpts, DigestResult, DigestStats } from './digest.js';
 
 // F2 — Learning
 export {
