@@ -133,10 +133,10 @@ export function createVerification(
   db: Database.Database,
   beliefId: string,
   strategy: VerificationStrategy = 'manual',
-): string {
+): string | undefined {
   // Resolve the belief ID (supports prefix matching)
   const resolvedBeliefId = resolveId(db, 'beliefs', beliefId);
-  if (!resolvedBeliefId) return '';
+  if (!resolvedBeliefId) return undefined;
 
   // Check for existing pending/in_progress verification for this belief
   const existing = db.prepare(`

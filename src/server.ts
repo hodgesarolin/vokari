@@ -23,7 +23,7 @@ import {
   resolvePrediction, getPendingReview, getCalibration,
 } from './predictions.js';
 import {
-  addPosition, listPositions, challengePosition,
+  addPosition, getPosition, listPositions, challengePosition,
   revisePosition, abandonPosition, getUnchallenged, getPositionContext,
 } from './positions.js';
 import { calibrationReport } from './calibration.js';
@@ -34,7 +34,7 @@ import { compileAwarenessContext } from './awareness.js';
 import { extractBeliefs as extractLearningBeliefs, extractTopics, extractCorrections as extractLearningCorrections, extractUrls } from './learning.js';
 import { analyzeCycling, analyzeAttentionBudget } from './metacognition.js';
 import {
-  verificationTick, createVerification, recordVerification,
+  verificationTick, createVerification, getVerification, recordVerification,
   skipVerification, verificationStatus, getBeliefVerifications,
   opportunisticVerification,
 } from './verification.js';
@@ -441,8 +441,10 @@ tool(
     notes: z.string().optional().describe('Resolution notes'),
   },
   async (params) => {
-    resolvePrediction(db, params.id, params.outcome, params.notes);
-    return { content: [{ type: 'text' as const, text: `Prediction ${params.id.slice(0, 8)} resolved as: ${params.outcome}` }] };
+    const prediction = getPrediction(db, params.id);
+    if (!prediction) return { content: [{ type: 'text' as const, text: `Prediction not found: ${params.id}` }] };
+    resolvePrediction(db, prediction.id, params.outcome, params.notes);
+    return { content: [{ type: 'text' as const, text: `Prediction ${prediction.id.slice(0, 8)} resolved as: ${params.outcome}` }] };
   },
 );
 
@@ -495,8 +497,10 @@ tool(
   'Challenge an existing position — increments challenge count',
   { id: z.string().describe('Position ID') },
   async (params) => {
-    challengePosition(db, params.id);
-    return { content: [{ type: 'text' as const, text: `Position ${params.id.slice(0, 8)} challenged.` }] };
+    const position = getPosition(db, params.id);
+    if (!position) return { content: [{ type: 'text' as const, text: `Position not found: ${params.id}` }] };
+    challengePosition(db, position.id);
+    return { content: [{ type: 'text' as const, text: `Position ${position.id.slice(0, 8)} challenged.` }] };
   },
 );
 
@@ -732,16 +736,8 @@ tool(
       budget: params.budget,
       includeCalibration: params.include_calibration,
     });
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          digest: result.digest,
-          stats: result.stats,
-          source_count: result.sources.length,
-        }, null, 2),
-      }],
-    };
+    const summary = `${result.digest}\n\n---\nStats: ${result.stats.totalChanges} changes (${result.sources.length} sources)`;
+    return { content: [{ type: 'text' as const, text: summary }] };
   },
 );
 
@@ -781,6 +777,7 @@ tool(
   },
   async (params) => {
     const id = createVerification(db, params.belief_id, params.strategy as VerificationStrategy);
+    if (!id) return { content: [{ type: 'text' as const, text: `Belief not found: ${params.belief_id}` }] };
     return { content: [{ type: 'text' as const, text: `Verification queued: ${id.slice(0, 8)} for belief ${params.belief_id.slice(0, 8)}` }] };
   },
 );
@@ -809,8 +806,10 @@ tool(
     reason: z.string().optional().describe('Why the verification was skipped'),
   },
   async (params) => {
-    skipVerification(db, params.verification_id, params.reason);
-    return { content: [{ type: 'text' as const, text: `Verification ${params.verification_id.slice(0, 8)} skipped${params.reason ? `: ${params.reason}` : ''}` }] };
+    const v = getVerification(db, params.verification_id);
+    if (!v) return { content: [{ type: 'text' as const, text: `Verification not found: ${params.verification_id}` }] };
+    skipVerification(db, v.id, params.reason);
+    return { content: [{ type: 'text' as const, text: `Verification ${v.id.slice(0, 8)} skipped${params.reason ? `: ${params.reason}` : ''}` }] };
   },
 );
 

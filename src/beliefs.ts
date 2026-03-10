@@ -177,8 +177,9 @@ export function initBeliefs(db: Database.Database): void {
   for (const migration of MIGRATIONS) {
     try {
       db.exec(migration);
-    } catch {
-      // Column/constraint already exists — safe to ignore
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw err;
     }
   }
 }

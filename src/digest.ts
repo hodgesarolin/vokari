@@ -48,16 +48,7 @@ interface ChangeRow {
   type: string;
   key: string | null;
   content: string;
-  metadata: string;
   updated_at: string;
-}
-
-function safeParse(json: string): Record<string, unknown> {
-  try {
-    return JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
 }
 
 function truncate(s: string, maxLen: number): string {
