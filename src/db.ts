@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { initBeliefs } from './beliefs.js';
 import { initPredictions } from './predictions.js';
 import { initPositions } from './positions.js';
-import { initEvents } from './events.js';
+
 import { initVerifications } from './verification.js';
 
 export type CorrectionType = 'fact' | 'pattern' | 'policy' | 'technical';
@@ -91,7 +91,6 @@ export function initDb(path: string): Database.Database {
   initBeliefs(db);
   initPredictions(db);
   initPositions(db);
-  initEvents(db);
   initVerifications(db);
   return db;
 }

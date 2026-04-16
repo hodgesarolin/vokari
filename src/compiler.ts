@@ -26,7 +26,7 @@ import {
   MetadataFilter,
   OrderBy,
 } from './knowledge.js';
-import type { KnowledgeType, Knowledge, EmbedFn, MetadataFilter as MetadataFilterType } from './knowledge.js';
+import type { KnowledgeType, Knowledge, MetadataFilter as MetadataFilterType } from './knowledge.js';
 
 // ── Types ──
 
@@ -39,8 +39,6 @@ export interface AssembleContextOpts {
   sessionType: SessionType;
   /** Optional query for relevance-based retrieval in the third layer. */
   query?: string;
-  /** Optional embed function for hybrid search in relevance layer. */
-  embedFn?: EmbedFn;
   /** Include section headers in output (default: true). */
   headers?: boolean;
   /** Custom session layer configs. If provided, overrides the built-in defaults. */
