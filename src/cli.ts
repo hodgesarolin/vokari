@@ -27,8 +27,8 @@ function usage(): void {
   vokari beliefs [--db <path>]                     Print belief statistics
   vokari predictions [--db <path>]                 List pending predictions
   vokari verify [--db <path>]                      Print verification status
-  vokari serve [--dashboard] [--port 3838] [--db <path>]  Start MCP server (+ optional dashboard)
-  vokari dashboard [--port 3838] [--db <path>]     Start calibration dashboard
+  vokari serve [--dashboard] [--port <n>] [--db <path>]   Start MCP server (+ optional dashboard)
+  vokari dashboard [--port <n>] [--db <path>]      Start calibration dashboard
 
 Options:
   --db <path>    Database path (default: ./epistemic.db or EPISTEMIC_DB env)
@@ -337,22 +337,17 @@ if (command === 'init') {
   db.close();
 
 } else if (command === 'serve') {
-  const db = initDb(dbPath);
-  initKnowledge(db);
-
   if (hasFlag('--dashboard')) {
     const port = parseInt(getArg('--port') ?? '3838', 10);
+    const db = initDb(dbPath);
+    initKnowledge(db);
     startDashboard(db, port);
   }
 
-  // Start MCP server on stdio
-  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
-  const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
-  // The server module handles tool registration — for serve, we just start stdio transport
-  // Note: In practice, the main server.ts module is the MCP entry point.
-  // This command is a convenience wrapper.
-  console.error('MCP server starting on stdio...');
-  const transport = new StdioServerTransport();
+  // Start the full MCP server (server.ts is the real entry point with all tool registrations).
+  // We import it dynamically so it runs with the correct EPISTEMIC_DB env.
+  process.env.EPISTEMIC_DB = dbPath;
+  await import('./server.js');
 
 } else if (command === 'dashboard') {
   const port = parseInt(getArg('--port') ?? '3838', 10);

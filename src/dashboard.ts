@@ -17,7 +17,7 @@ import { verificationStatus } from './verification.js';
 import { getKnowledgeStats } from './knowledge.js';
 import { getPendingReview } from './predictions.js';
 import { compileDigest } from './digest.js';
-import type { Prediction, Domain } from './predictions.js';
+import type { Prediction } from './predictions.js';
 
 export interface DashboardData {
   calibration: {
@@ -207,6 +207,7 @@ function dashboardHtml(): string {
   app.className = '';
 
   const pct = v => (v * 100).toFixed(1) + '%';
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const biasClass = d => d === 'well-calibrated' ? 'bias-well' : d === 'overconfident' ? 'bias-over' : 'bias-under';
 
   let html = '<div class="grid">';
@@ -216,7 +217,7 @@ function dashboardHtml(): string {
   html += '<div class="stat"><div class="stat-value">' + pct(data.calibration.accuracy) + '</div><div class="stat-label">Accuracy</div></div>';
   html += '<div class="stat"><div class="stat-value">' + data.calibration.brier_score.toFixed(4) + '</div><div class="stat-label">Brier Score</div></div>';
   html += '<div class="stat"><div class="stat-value">' + pct(data.calibration.average_confidence) + '</div><div class="stat-label">Avg Confidence</div></div>';
-  html += '<div class="stat"><div class="stat-value ' + biasClass(data.calibration.bias.direction) + '">' + data.calibration.bias.direction + '</div><div class="stat-label">Bias</div></div>';
+  html += '<div class="stat"><div class="stat-value ' + biasClass(data.calibration.bias.direction) + '">' + esc(data.calibration.bias.direction) + '</div><div class="stat-label">Bias</div></div>';
   html += '<div class="stat"><div class="stat-value">' + data.calibration.total + '</div><div class="stat-label">Total</div></div>';
   html += '<div class="stat"><div class="stat-value">' + data.calibration.resolved + '</div><div class="stat-label">Resolved</div></div>';
   html += '<div class="stat"><div class="stat-value">' + data.calibration.pending + '</div><div class="stat-label">Pending</div></div>';
@@ -252,7 +253,7 @@ function dashboardHtml(): string {
     html += '<div class="stat"><div class="stat-value">' + data.knowledge.total + '</div><div class="stat-label">Total Entries</div></div>';
     html += '<table><tr><th>Type</th><th>Count</th></tr>';
     for (const t of data.knowledge.by_type) {
-      html += '<tr><td>' + t.type + '</td><td>' + t.count + '</td></tr>';
+      html += '<tr><td>' + esc(t.type) + '</td><td>' + Number(t.count) + '</td></tr>';
     }
     html += '</table></div>';
   }
@@ -373,7 +374,7 @@ export function startDashboard(db: Database.Database, port: number = 3838): Retu
     }
   });
 
-  server.listen(port, () => {
+  server.listen(port, '127.0.0.1', () => {
     console.log(`Vokari dashboard: http://localhost:${port}`);
   });
 
@@ -388,14 +389,11 @@ if (process.argv[1]?.endsWith('dashboard.ts') || process.argv[1]?.endsWith('dash
   const dbIdx = args.indexOf('--db');
   const dbPath = dbIdx >= 0 ? args[dbIdx + 1] : process.env.EPISTEMIC_DB ?? './epistemic.db';
 
-  const { default: Database } = await import('better-sqlite3');
   const { initDb } = await import('./db.js');
   const { initKnowledge } = await import('./knowledge.js');
-  const { initVerifications } = await import('./verification.js');
 
   const db = initDb(dbPath);
   initKnowledge(db);
-  initVerifications(db);
 
   startDashboard(db, port);
 }

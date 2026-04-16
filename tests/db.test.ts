@@ -337,13 +337,17 @@ describe('searchCorrections', () => {
   });
 
   it('orders by violation count descending', () => {
-    const id = addCorrection(db, { type: 'fact', content: 'High violation searchable', permanence: 'never' });
-    recordViolation(db, id);
-    recordViolation(db, id);
-    recordViolation(db, id);
+    const high = addCorrection(db, { type: 'fact', content: 'High violation searchable', permanence: 'never' });
+    const low = addCorrection(db, { type: 'fact', content: 'Low violation searchable', permanence: 'never' });
+    recordViolation(db, high);
+    recordViolation(db, high);
+    recordViolation(db, high);
+    recordViolation(db, low);
 
     const results = searchCorrections(db, 'searchable');
+    expect(results).toHaveLength(2);
     expect(results[0].violation_count).toBe(3);
+    expect(results[1].violation_count).toBe(1);
   });
 });
 
