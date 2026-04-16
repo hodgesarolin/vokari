@@ -15,6 +15,8 @@ import { calibrationByDomain, getSystematicBias, brierScore } from './calibratio
 import { getBeliefStats } from './beliefs.js';
 import { verificationStatus } from './verification.js';
 import { getKnowledgeStats } from './knowledge.js';
+import { getPendingReview } from './predictions.js';
+import { compileDigest } from './digest.js';
 import type { Prediction, Domain } from './predictions.js';
 
 export interface DashboardData {
@@ -320,12 +322,49 @@ function dashboardHtml(): string {
 /**
  * Start the dashboard HTTP server.
  */
-export function startDashboard(db: Database.Database, port: number = 3939): void {
+export function startDashboard(db: Database.Database, port: number = 3838): ReturnType<typeof createServer> {
   const server = createServer((req, res) => {
-    if (req.url === '/api/dashboard') {
+    const url = req.url ?? '/';
+
+    // JSON API endpoints
+    if (url === '/api/dashboard') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(getDashboardData(db)));
-    } else if (req.url === '/' || req.url === '/index.html') {
+    } else if (url === '/api/calibration') {
+      const data = getDashboardData(db);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data.calibration));
+    } else if (url === '/api/beliefs/stats') {
+      const data = getDashboardData(db);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data.beliefs));
+    } else if (url === '/api/predictions/pending') {
+      try {
+        const pending = getPendingReview(db);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(pending));
+      } catch {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('[]');
+      }
+    } else if (url === '/api/verification/status') {
+      const data = getDashboardData(db);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data.verification));
+    } else if (url.startsWith('/api/digest')) {
+      try {
+        const urlObj = new URL(url, 'http://localhost');
+        const since = urlObj.searchParams.get('since') ?? undefined;
+        const result = compileDigest(db, { since });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ digest: '', stats: { totalChanges: 0 }, sources: [] }));
+      }
+
+    // HTML dashboard
+    } else if (url === '/' || url === '/index.html') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(dashboardHtml());
     } else {
@@ -337,13 +376,15 @@ export function startDashboard(db: Database.Database, port: number = 3939): void
   server.listen(port, () => {
     console.log(`Vokari dashboard: http://localhost:${port}`);
   });
+
+  return server;
 }
 
 // CLI entry point
 if (process.argv[1]?.endsWith('dashboard.ts') || process.argv[1]?.endsWith('dashboard.js')) {
   const args = process.argv.slice(2);
   const portIdx = args.indexOf('--port');
-  const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : 3939;
+  const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : 3838;
   const dbIdx = args.indexOf('--db');
   const dbPath = dbIdx >= 0 ? args[dbIdx + 1] : process.env.EPISTEMIC_DB ?? './epistemic.db';
 

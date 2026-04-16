@@ -3,16 +3,15 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import {
   initDb, addCorrection, getCorrection, listCorrections,
-  recordViolation, graduateCorrection, deleteCorrection, getContext, getStats,
+  searchCorrections, recordViolation, graduateCorrection, getContext, getStats,
 } from './db.js';
 import {
   initKnowledge, addKnowledge, getKnowledge, getKnowledgeByKey,
-  listKnowledge, updateKnowledge, upsertKnowledge, deleteKnowledge,
-  searchKnowledge, getKnowledgeStats, importAllToKnowledge,
+  updateKnowledge, upsertKnowledge, deleteKnowledge,
+  searchKnowledge, getKnowledgeStats,
 } from './knowledge.js';
 import type { KnowledgeType } from './knowledge.js';
 import { assembleContext } from './compiler.js';
-import type { SessionType } from './compiler.js';
 import {
   addBelief, getBelief, listBeliefs, checkObservation,
   recordContradiction, confirmBelief, reviseBelief, retireBelief,
@@ -40,8 +39,8 @@ const db = initDb(dbPath);
 initKnowledge(db);
 
 const server = new McpServer({
-  name: 'epistemic',
-  version: '0.2.1', // Opportunistic verification on every tool call
+  name: 'vokari',
+  version: '0.4.0',
 });
 
 // ────────────────────────────────────────────
@@ -167,18 +166,6 @@ tool(
 );
 
 tool(
-  'get_context',
-  'Get formatted corrections for system prompt injection, priority-ordered within a character budget',
-  {
-    budget: z.number().optional().default(4000).describe('Maximum characters for the context block'),
-  },
-  async (params) => {
-    const context = getContext(db, params.budget);
-    return { content: [{ type: 'text' as const, text: context }] };
-  },
-);
-
-tool(
   'list_corrections',
   'List all corrections, optionally filtered by type',
   {
@@ -222,14 +209,20 @@ tool(
 );
 
 tool(
-  'delete_correction',
-  'Permanently delete a correction',
-  { id: z.string().describe('Correction ID') },
+  'search_corrections',
+  'Search corrections by content text. Returns active corrections matching the query.',
+  {
+    query: z.string().describe('Search terms'),
+    type: z.enum(['fact', 'pattern', 'policy', 'technical']).optional().describe('Filter by correction type'),
+    limit: z.number().optional().default(20).describe('Max results'),
+  },
   async (params) => {
-    const correction = getCorrection(db, params.id);
-    if (!correction) return { content: [{ type: 'text' as const, text: `Correction not found: ${params.id}` }] };
-    deleteCorrection(db, params.id);
-    return { content: [{ type: 'text' as const, text: `Deleted: ${correction.content}` }] };
+    const results = searchCorrections(db, params.query, { type: params.type, limit: params.limit });
+    if (results.length === 0) return { content: [{ type: 'text' as const, text: 'No matching corrections found.' }] };
+    const text = results.map(c =>
+      `[${c.id.slice(0, 8)}] (${c.type}) ${c.content}${c.violation_count > 0 ? ` [${c.violation_count} violations]` : ''}`
+    ).join('\n');
+    return { content: [{ type: 'text' as const, text }] };
   },
 );
 
@@ -426,21 +419,24 @@ tool(
 
 tool(
   'revise_prediction',
-  'Revise an unresolved prediction — update text, confidence, or reasoning. Creates a new prediction that supersedes the original (which is voided for calibration integrity).',
+  'Revise an unresolved prediction in-place — update text, confidence, or reasoning. Records revision history for audit trail.',
   {
     id: z.string().describe('Prediction ID to revise'),
     prediction: z.string().optional().describe('Updated prediction text'),
     confidence: z.number().optional().describe('Updated confidence (0-1)'),
     reasoning: z.string().optional().describe('Updated reasoning'),
+    reason: z.string().optional().describe('Why this revision is needed'),
   },
   async (params) => {
-    const newId = revisePrediction(db, params.id, {
+    const resultId = revisePrediction(db, params.id, {
       prediction: params.prediction,
       confidence: params.confidence,
       reasoning: params.reasoning,
+      reason: params.reason,
     });
-    if (!newId) return { content: [{ type: 'text' as const, text: `Prediction not found or already resolved: ${params.id}` }] };
-    return { content: [{ type: 'text' as const, text: `Prediction revised. New ID: ${newId.slice(0, 8)} (supersedes ${params.id.slice(0, 8)})` }] };
+    if (!resultId) return { content: [{ type: 'text' as const, text: `Prediction not found or already resolved: ${params.id}` }] };
+    const revised = getPrediction(db, resultId);
+    return { content: [{ type: 'text' as const, text: `Prediction ${resultId.slice(0, 8)} revised. ${revised?.revision_history.length ?? 0} revision(s) recorded.` }] };
   },
 );
 
@@ -794,40 +790,28 @@ tool(
 );
 
 tool(
-  'list_knowledge',
-  'List knowledge entries, optionally filtered by type',
-  {
-    type: z.enum(KNOWLEDGE_TYPES).optional().describe('Filter by type'),
-    mutable: z.boolean().optional().describe('Filter by mutability'),
-    limit: z.number().optional().default(20).describe('Max results'),
-  },
-  async (params) => {
-    const items = listKnowledge(db, {
-      type: params.type as KnowledgeType | undefined,
-      mutable: params.mutable,
-      limit: params.limit,
-    });
-    if (items.length === 0) return { content: [{ type: 'text' as const, text: 'No knowledge entries found.' }] };
-    const lines = items.map(k =>
-      `[${k.id?.slice(0, 8) ?? '?'}] ${k.type}${k.key ? `/${k.key}` : ''} (${k.mutable ? 'mutable' : 'immutable'}) — ${k.content?.slice(0, 80) ?? '(empty)'}${(k.content?.length ?? 0) > 80 ? '...' : ''}`
-    );
-    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-  },
-);
-
-tool(
   'assemble_context',
-  'Compile a context window from the knowledge store. Four layers: mandatory (corrections/identity), maintenance (epistemic health alerts), session (varies by type), relevance (search-based).',
+  'Compile a context window from epistemic data. Three layers: mandatory (corrections/beliefs/positions), maintenance (epistemic health alerts), relevance (query-driven search).',
   {
     budget: z.number().describe('Max characters for the context window'),
-    session_type: z.enum(['interactive', 'cron_thinking', 'cron_digest', 'cron_health']).describe('Session type determines which knowledge is included'),
+    include_corrections: z.boolean().optional().default(true).describe('Include corrections (default: true)'),
+    include_beliefs: z.boolean().optional().default(true).describe('Include beliefs (default: true)'),
+    include_positions: z.boolean().optional().default(true).describe('Include positions (default: true)'),
+    include_predictions: z.boolean().optional().default(false).describe('Include pending predictions (default: false)'),
+    include_maintenance: z.boolean().optional().default(true).describe('Include maintenance alerts (default: true)'),
     query: z.string().optional().describe('Optional query for relevance-based retrieval'),
     headers: z.boolean().optional().default(true).describe('Include section headers'),
   },
   async (params) => {
     const result = assembleContext(db, {
       budget: params.budget,
-      sessionType: params.session_type as SessionType,
+      include: {
+        corrections: params.include_corrections,
+        beliefs: params.include_beliefs,
+        positions: params.include_positions,
+        predictions: params.include_predictions,
+        maintenance: params.include_maintenance,
+      },
       query: params.query,
       headers: params.headers,
     });
@@ -836,8 +820,8 @@ tool(
       : '';
     const summary = [
       `Budget: ${result.breakdown.total}/${result.breakdown.budget} chars (${result.breakdown.utilizationPct}%)`,
-      `Mandatory: ${result.breakdown.mandatory} | Session: ${result.breakdown.session} | Relevance: ${result.breakdown.relevance}${maintenanceNote}`,
-      `Included: ${result.includedIds.length} entries | Excluded: ${result.excluded}`,
+      `Mandatory: ${result.breakdown.mandatory} | Relevance: ${result.breakdown.relevance}${maintenanceNote}`,
+      `Excluded: ${result.excluded}`,
       '---',
       result.context,
     ].join('\n');
@@ -861,72 +845,14 @@ tool(
   },
 );
 
-tool(
-  'import_to_knowledge',
-  'Import existing beliefs, corrections, positions, and predictions into the unified knowledge store. Safe to run multiple times (uses INSERT OR IGNORE).',
-  {},
-  async () => {
-    const result = importAllToKnowledge(db);
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `Imported ${result.total} entries:\n- Beliefs: ${result.beliefs}\n- Corrections: ${result.corrections}\n- Positions: ${result.positions}\n- Predictions: ${result.predictions}`,
-      }],
-    };
-  },
-);
-
-tool(
-  'upsert_handoff',
-  'Write or update a handoff document (mutable). Convenience wrapper for upsert_knowledge with type=handoff.',
-  {
-    key: z.string().describe('Handoff key (e.g., "interactive-context", "last-session-handoff", "nightly-state", "daily-todos")'),
-    content: z.string().describe('The handoff content'),
-    metadata: z.record(z.string(), z.unknown()).optional().describe('Optional metadata'),
-  },
-  async (params) => {
-    const id = upsertKnowledge(db, {
-      type: 'handoff',
-      key: params.key,
-      content: params.content,
-      metadata: params.metadata as Record<string, unknown>,
-    });
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `Handoff upserted: ${params.key} (${id.slice(0, 8)})\nLength: ${params.content.length} chars`,
-      }],
-    };
-  },
-);
-
-tool(
-  'get_handoff',
-  'Read a handoff document by key. Returns the latest content.',
-  {
-    key: z.string().describe('Handoff key'),
-  },
-  async (params) => {
-    const k = getKnowledgeByKey(db, 'handoff', params.key);
-    if (!k) return { content: [{ type: 'text' as const, text: `Handoff not found: ${params.key}` }] };
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `[handoff/${params.key}] Updated: ${k.updated_at}\n\n${k.content}`,
-      }],
-    };
-  },
-);
-
 // Knowledge context resource
 server.resource(
   'knowledge-context',
   'epistemic://knowledge',
-  { description: 'Assembled context from unified knowledge store', mimeType: 'text/markdown' },
+  { description: 'Assembled context from epistemic data', mimeType: 'text/markdown' },
   async (uri) => {
     const result = assembleContext(db, {
       budget: 50000,
-      sessionType: 'interactive',
     });
     return {
       contents: [{

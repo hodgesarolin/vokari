@@ -84,10 +84,57 @@ export function resolveId(db: Database.Database, table: string, id: string): str
   return undefined;
 }
 
+// ── Migration System ──
+
+/**
+ * Run a named migration exactly once. Uses a _migrations table to track
+ * which migrations have already been applied. Replaces the old
+ * "swallow duplicate column" pattern.
+ */
+export function runMigration(
+  db: Database.Database,
+  name: string,
+  sql: string,
+): boolean {
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  const exists = db.prepare(
+    'SELECT 1 FROM _migrations WHERE name = ?'
+  ).get(name);
+  if (exists) return false;
+
+  try {
+    db.exec(sql);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    // Schema migrations may fail if column/table already exists (fresh DB with updated schema).
+    // Mark as applied since the desired state is already in place.
+    if (msg.includes('duplicate column') || msg.includes('already exists')) {
+      db.prepare('INSERT INTO _migrations (name) VALUES (?)').run(name);
+      return false;
+    }
+    throw err;
+  }
+
+  db.prepare('INSERT INTO _migrations (name) VALUES (?)').run(name);
+  return true;
+}
+
+// ── Indexes ──
+
+const INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_corrections_type ON corrections(type);
+  CREATE INDEX IF NOT EXISTS idx_corrections_graduated ON corrections(graduated_at);
+`;
+
 export function initDb(path: string): Database.Database {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
+  db.exec(INDEXES);
   initBeliefs(db);
   initPredictions(db);
   initPositions(db);
@@ -122,6 +169,7 @@ export function getCorrection(db: Database.Database, id: string): Correction | u
 export function listCorrections(db: Database.Database, opts?: {
   type?: CorrectionType;
   active?: boolean;
+  limit?: number;
 }): Correction[] {
   let sql = 'SELECT * FROM corrections WHERE 1=1';
   const params: unknown[] = [];
@@ -135,6 +183,32 @@ export function listCorrections(db: Database.Database, opts?: {
   }
 
   sql += ' ORDER BY created_at DESC';
+  const limit = opts?.limit ?? 100;
+  sql += ' LIMIT ?';
+  params.push(limit);
+  return db.prepare(sql).all(...params) as Correction[];
+}
+
+/**
+ * Full-text search across corrections using LIKE matching.
+ * Returns active corrections whose content matches the query.
+ */
+export function searchCorrections(db: Database.Database, query: string, opts?: {
+  type?: CorrectionType;
+  limit?: number;
+}): Correction[] {
+  let sql = 'SELECT * FROM corrections WHERE graduated_at IS NULL AND content LIKE ?';
+  const params: unknown[] = [`%${query}%`];
+
+  if (opts?.type) {
+    sql += ' AND type = ?';
+    params.push(opts.type);
+  }
+
+  sql += ' ORDER BY violation_count DESC, created_at DESC';
+  const limit = opts?.limit ?? 20;
+  sql += ' LIMIT ?';
+  params.push(limit);
   return db.prepare(sql).all(...params) as Correction[];
 }
 

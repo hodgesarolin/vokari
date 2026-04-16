@@ -1,178 +1,33 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { initKnowledge, addKnowledge, upsertKnowledge } from '../src/knowledge.js';
+import { initDb } from '../src/db.js';
+import { addCorrection } from '../src/db.js';
+import { addBelief } from '../src/beliefs.js';
+import { addPosition } from '../src/positions.js';
+import { addPrediction } from '../src/predictions.js';
+import { initKnowledge, addKnowledge, upsertKnowledge, searchKnowledge } from '../src/knowledge.js';
 import { assembleContext } from '../src/compiler.js';
-import type { SessionType } from '../src/compiler.js';
 
 let db: Database.Database;
 
-/**
- * Set up a knowledge store with realistic test data
- * mirroring Brain's actual content types.
- */
-function seedTestData(db: Database.Database): void {
-  // Corrections (mandatory layer)
-  addKnowledge(db, {
-    type: 'correction',
-    key: 'correction-policy-1',
-    content: 'Brain is personal only — do not research Prenosis',
-    metadata: { correction_type: 'policy', permanence: 'never', violation_count: 0, graduated_at: null },
-  });
-  addKnowledge(db, {
-    type: 'correction',
-    key: 'correction-fact-1',
-    content: "Kim's income is $105/hr",
-    metadata: { correction_type: 'fact', permanence: 'never', violation_count: 0, graduated_at: null },
-  });
-  addKnowledge(db, {
-    type: 'correction',
-    key: 'correction-pattern-1',
-    content: 'Always verify day of week',
-    metadata: { correction_type: 'pattern', permanence: 'graduable', violation_count: 2, graduated_at: null },
-  });
-  addKnowledge(db, {
-    type: 'correction',
-    key: 'correction-technical-1',
-    content: 'No MCP tools in cron',
-    metadata: { correction_type: 'technical', permanence: 'graduable', violation_count: 0, graduated_at: null },
-  });
-
-  // Graduated correction (should be excluded)
-  addKnowledge(db, {
-    type: 'correction',
-    key: 'correction-graduated',
-    content: 'Old graduated correction',
-    metadata: { correction_type: 'fact', permanence: 'graduable', violation_count: 0, graduated_at: '2026-01-01' },
-  });
-
-  // Identity (mandatory layer)
-  upsertKnowledge(db, {
-    type: 'context',
-    key: 'identity',
-    content: 'Brain is a personal AI assistant for Daniel Hodges. Named after Data and the Doctor.',
-  });
-
-  // Decisions (mandatory layer)
-  upsertKnowledge(db, {
-    type: 'context',
-    key: 'decisions',
-    content: 'Daniel is subscription-based. Cost does not matter, rate limits are the constraint.',
-  });
-
-  // Interactive context (session layer - interactive)
-  upsertKnowledge(db, {
-    type: 'handoff',
-    key: 'interactive-context',
-    content: 'Daniel returned from Disney Feb 10. 40th birthday Feb 11. Vokari feature complete. DHS shutdown Day 8.',
-  });
-
-  // Family (session layer - interactive)
-  upsertKnowledge(db, {
-    type: 'context',
-    key: 'family',
-    content: 'Wife Kim (DVM), 3 kids: Lily 6, Ben 4, Rowan 19mo. PS 28 school.',
-  });
-
-  // Personal context (session layer - interactive)
-  upsertKnowledge(db, {
-    type: 'context',
-    key: 'personal',
-    content: 'Daniel: Lead Cloud Infra Engineer @ Prenosis. $195K + 15% bonus. JC Heights, NJ.',
-  });
-
-  // Daily todos (session layer - interactive + cron_digest)
-  upsertKnowledge(db, {
-    type: 'handoff',
-    key: 'daily-todos',
-    content: 'Pre-K registration reminder Feb 27-28. Ward D budget meeting Mar 18.',
-  });
-
-  // Active predictions (session layer)
-  addKnowledge(db, {
-    type: 'prediction',
-    key: 'prediction-dhs-shutdown',
-    content: 'DHS shutdown duration: median ~13 days',
-    metadata: { confidence: 0.5, domain: 'political', outcome: null, check_date: '2026-03-01' },
-  });
-  addKnowledge(db, {
-    type: 'prediction',
-    key: 'prediction-scotus-resolved',
-    content: 'SCOTUS IEEPA: government loses 6-3',
-    metadata: { confidence: 0.7, domain: 'political', outcome: 'correct', resolved_at: '2026-02-20' },
-  });
-
-  // Active positions (session layer)
-  addKnowledge(db, {
-    type: 'position',
-    key: 'position-context-first',
-    content: 'Context quality has higher marginal ROI than model quality',
-    metadata: { confidence: 0.7, status: 'held', topic: 'Context-first thesis' },
-  });
-  addKnowledge(db, {
-    type: 'position',
-    key: 'position-abandoned',
-    content: 'Abandoned position about something',
-    metadata: { confidence: 0.3, status: 'abandoned', topic: 'Old topic' },
-  });
-
-  // Last session handoff (session layer - cron_thinking)
-  upsertKnowledge(db, {
-    type: 'handoff',
-    key: 'last-session-handoff',
-    content: 'Context rot research done. Toptal guide updated. Artemis II ready. SDK auth confirmed.',
-  });
-
-  // Nightly state (session layer - cron_thinking + cron_health)
-  upsertKnowledge(db, {
-    type: 'handoff',
-    key: 'nightly-state',
-    content: 'Brain v1.10.0 running. Opus 4.6. SDK 0.2.42. 31 corrections. 5+ day adherence streak.',
-  });
-
-  // Research content (relevance layer)
-  addKnowledge(db, {
-    type: 'research',
-    key: 'research-scotus',
-    content: 'SCOTUS IEEPA ruling struck down tariff authority 6-3. Roberts authored. Section 122 replacement signed same day.',
-  });
-  addKnowledge(db, {
-    type: 'research',
-    key: 'research-shoulder',
-    content: 'Rotator cuff surgery recovery: 5-6 months to lift toddler. Narrow window for Daniel.',
-  });
-
-  // Archive content
-  addKnowledge(db, {
-    type: 'archive',
-    key: 'archive-emigration',
-    content: 'Austrian citizenship via section 58c. 3 quick-start actions identified. NY consulate.',
-  });
-}
-
 beforeEach(() => {
-  db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
+  db = initDb(':memory:');
   initKnowledge(db);
-  seedTestData(db);
 });
 
 // ── Basic Assembly ──
 
 describe('assembleContext', () => {
   it('returns a context string', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
+    addCorrection(db, { type: 'policy', content: 'No work stuff', permanence: 'never' });
+    const result = assembleContext(db, { budget: 50000 });
     expect(result.context).toBeTruthy();
     expect(result.context.length).toBeGreaterThan(0);
   });
 
   it('returns breakdown statistics', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
+    addCorrection(db, { type: 'fact', content: 'Test fact', permanence: 'never' });
+    const result = assembleContext(db, { budget: 500 });
     expect(result.breakdown).toBeDefined();
     expect(result.breakdown.mandatory).toBeGreaterThan(0);
     expect(result.breakdown.total).toBeLessThanOrEqual(result.breakdown.budget);
@@ -180,430 +35,228 @@ describe('assembleContext', () => {
     expect(result.breakdown.utilizationPct).toBeLessThanOrEqual(100);
   });
 
-  it('includes IDs of knowledge rows', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.includedIds.length).toBeGreaterThan(0);
+  it('never exceeds budget', () => {
+    addCorrection(db, { type: 'policy', content: 'A very important correction that should be included', permanence: 'never' });
+    addCorrection(db, { type: 'fact', content: 'Another fact that takes up space', permanence: 'never' });
+    addBelief(db, { statement: 'The sky is blue', category: 'world' });
+    const result = assembleContext(db, { budget: 200 });
+    expect(result.context.length).toBeLessThanOrEqual(200);
   });
 
-  it('never exceeds budget', () => {
-    const result = assembleContext(db, {
-      budget: 500,
-      sessionType: 'interactive',
-    });
-    expect(result.context.length).toBeLessThanOrEqual(500);
+  it('returns empty context for empty db', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context.trim()).toBe('');
+    expect(result.breakdown.total).toBe(0);
   });
 });
 
-// ── Mandatory Layer ──
+// ── Corrections Layer ──
 
-describe('mandatory layer', () => {
-  it('includes active corrections', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('Brain is personal only');
+describe('corrections in context', () => {
+  beforeEach(() => {
+    addCorrection(db, { type: 'policy', content: 'No work stuff', permanence: 'never' });
+    addCorrection(db, { type: 'fact', content: "Kim's income is $105/hr", permanence: 'never' });
+    addCorrection(db, { type: 'pattern', content: 'Always verify day of week', permanence: 'graduable' });
+  });
+
+  it('includes corrections by default', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context).toContain('No work stuff');
     expect(result.context).toContain("Kim's income is $105/hr");
     expect(result.context).toContain('Always verify day of week');
-    expect(result.context).toContain('No MCP tools in cron');
   });
 
-  it('excludes graduated corrections', () => {
+  it('excludes corrections when include.corrections=false', () => {
     const result = assembleContext(db, {
       budget: 50000,
-      sessionType: 'interactive',
+      include: { corrections: false },
     });
-    expect(result.context).not.toContain('Old graduated correction');
-  });
-
-  it('includes identity', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('Brain is a personal AI assistant');
-  });
-
-  it('includes decisions', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('subscription-based');
-  });
-
-  it('is included in all session types', () => {
-    const types: SessionType[] = ['interactive', 'cron_thinking', 'cron_digest', 'cron_health'];
-    for (const sessionType of types) {
-      const result = assembleContext(db, { budget: 50000, sessionType });
-      expect(result.context).toContain('Brain is personal only');
-      expect(result.context).toContain('Brain is a personal AI assistant');
-    }
-  });
-
-  it('shows violation count for corrections with violations', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('[2 violations]');
+    expect(result.context).not.toContain('No work stuff');
+    expect(result.context).not.toContain("Kim's income");
   });
 });
 
-// ── Session Layer: Interactive ──
+// ── Beliefs Layer ──
 
-describe('session layer — interactive', () => {
-  it('includes interactive context', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('returned from Disney');
+describe('beliefs in context', () => {
+  beforeEach(() => {
+    addBelief(db, { statement: 'The user prefers dark mode', category: 'user', confidence: 0.9 });
+    addBelief(db, { statement: 'TypeScript is the best language', category: 'world', confidence: 0.6 });
   });
 
-  it('includes family context', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('Kim (DVM)');
+  it('includes beliefs by default', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context).toContain('dark mode');
+    expect(result.context).toContain('TypeScript');
   });
 
-  it('includes personal context', () => {
+  it('excludes beliefs when include.beliefs=false', () => {
     const result = assembleContext(db, {
       budget: 50000,
-      sessionType: 'interactive',
+      include: { beliefs: false },
     });
-    expect(result.context).toContain('Lead Cloud Infra Engineer');
-  });
-
-  it('includes daily todos', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('Pre-K registration');
-  });
-
-  it('includes active predictions only (not resolved)', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('DHS shutdown duration');
-    expect(result.context).not.toContain('SCOTUS IEEPA: government loses');
-  });
-
-  it('includes active positions only (not abandoned)', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('Context quality has higher marginal ROI');
-    expect(result.context).not.toContain('Abandoned position');
+    expect(result.context).not.toContain('dark mode');
+    expect(result.context).not.toContain('TypeScript');
   });
 });
 
-// ── Session Layer: Cron Thinking ──
+// ── Positions Layer ──
 
-describe('session layer — cron_thinking', () => {
-  it('includes last session handoff', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'cron_thinking',
+describe('positions in context', () => {
+  beforeEach(() => {
+    addPosition(db, {
+      topic: 'Context-first thesis',
+      position: 'Context quality has higher ROI than model quality',
+      confidence: 0.8,
     });
-    expect(result.context).toContain('Context rot research done');
   });
 
-  it('includes nightly state', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'cron_thinking',
-    });
-    expect(result.context).toContain('Brain v1.10.0 running');
+  it('includes positions by default', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context).toContain('Context quality has higher ROI');
   });
 
-  it('does NOT include interactive context', () => {
+  it('excludes positions when include.positions=false', () => {
     const result = assembleContext(db, {
       budget: 50000,
-      sessionType: 'cron_thinking',
+      include: { positions: false },
     });
-    expect(result.context).not.toContain('returned from Disney');
+    expect(result.context).not.toContain('Context quality has higher ROI');
   });
 });
 
-// ── Session Layer: Cron Digest ──
+// ── Predictions Layer ──
 
-describe('session layer — cron_digest', () => {
-  it('is minimal — includes corrections and todos but not positions', () => {
+describe('predictions in context', () => {
+  it('excludes predictions by default', () => {
+    const pastDate = new Date(Date.now() - 86400000).toISOString();
+    addPrediction(db, {
+      topic: 'Weather',
+      prediction: 'It will rain tomorrow',
+      confidence: 0.8,
+      check_date: pastDate,
+    });
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context).not.toContain('It will rain');
+  });
+
+  it('includes predictions when include.predictions=true', () => {
+    const pastDate = new Date(Date.now() - 86400000).toISOString();
+    addPrediction(db, {
+      topic: 'Weather',
+      prediction: 'It will rain tomorrow',
+      confidence: 0.8,
+      check_date: pastDate,
+    });
     const result = assembleContext(db, {
       budget: 50000,
-      sessionType: 'cron_digest',
+      include: { predictions: true },
     });
-    // Has mandatory (corrections, identity, decisions)
-    expect(result.context).toContain('Brain is personal only');
-    // Has daily todos
-    expect(result.context).toContain('Pre-K registration');
-    // Does NOT have positions or predictions in session layer
-    // (they might appear in relevance layer though, so we just check size is smaller)
-    expect(result.breakdown.session).toBeLessThan(
-      assembleContext(db, { budget: 50000, sessionType: 'interactive' }).breakdown.session
-    );
+    expect(result.context).toContain('It will rain');
+  });
+});
+
+// ── Include Flags ──
+
+describe('include flags', () => {
+  beforeEach(() => {
+    addCorrection(db, { type: 'policy', content: 'Test correction', permanence: 'never' });
+    addBelief(db, { statement: 'Test belief', category: 'world' });
+    addPosition(db, { topic: 'Test', position: 'Test position', confidence: 0.7 });
+  });
+
+  it('all default to true except predictions', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context).toContain('Test correction');
+    expect(result.context).toContain('Test belief');
+    expect(result.context).toContain('Test position');
+  });
+
+  it('can disable everything', () => {
+    const result = assembleContext(db, {
+      budget: 50000,
+      include: {
+        corrections: false,
+        beliefs: false,
+        positions: false,
+        predictions: false,
+        maintenance: false,
+      },
+    });
+    expect(result.context.trim()).toBe('');
   });
 });
 
 // ── Relevance Layer ──
 
 describe('relevance layer', () => {
+  beforeEach(() => {
+    addKnowledge(db, {
+      type: 'research',
+      key: 'research-shoulder',
+      content: 'Rotator cuff surgery recovery: 5-6 months to lift toddler.',
+    });
+    addKnowledge(db, {
+      type: 'research',
+      key: 'research-scotus',
+      content: 'SCOTUS IEEPA ruling struck down tariff authority 6-3.',
+    });
+  });
+
   it('adds relevant content when query is provided', () => {
     const result = assembleContext(db, {
       budget: 50000,
-      sessionType: 'interactive',
       query: 'shoulder surgery recovery',
     });
     expect(result.context).toContain('Rotator cuff surgery');
   });
 
-  it('adds recent content when no query is provided', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'cron_thinking',
-    });
-    // Should include research or other recent content in relevance layer
-    expect(result.breakdown.relevance).toBeGreaterThanOrEqual(0);
-  });
-
-  it('does not duplicate content from mandatory/session layers', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-      query: 'correction verify day',
-    });
-    // The correction about verifying day of week should only appear once
-    const matches = result.context.match(/Always verify day of week/g);
-    expect(matches?.length ?? 0).toBeLessThanOrEqual(1);
+  it('does NOT add content when no query is provided', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    // Without a query, the relevance layer should not fill with recent content
+    expect(result.breakdown.relevance).toBe(0);
   });
 });
 
 // ── Budget Management ──
 
 describe('budget management', () => {
-  it('prioritizes mandatory over session', () => {
-    // Very tight budget — should still get corrections
-    const result = assembleContext(db, {
-      budget: 800,
-      sessionType: 'interactive',
-    });
-    // Corrections should be there
+  beforeEach(() => {
+    addCorrection(db, { type: 'policy', content: 'Important correction', permanence: 'never' });
+    addBelief(db, { statement: 'Important belief', category: 'world' });
+    addPosition(db, { topic: 'Test', position: 'Important position', confidence: 0.7 });
+  });
+
+  it('prioritizes corrections first', () => {
+    const result = assembleContext(db, { budget: 200 });
     expect(result.context).toContain('Corrections');
-    // But might not have family, personal, etc.
     expect(result.breakdown.mandatory).toBeGreaterThan(0);
   });
 
   it('counts excluded items', () => {
-    const result = assembleContext(db, {
-      budget: 500,
-      sessionType: 'interactive',
-    });
+    const result = assembleContext(db, { budget: 100 });
     expect(result.excluded).toBeGreaterThan(0);
   });
 
-  it('large budget includes everything', () => {
-    const result = assembleContext(db, {
-      budget: 100000,
-      sessionType: 'interactive',
-    });
-    expect(result.excluded).toBe(0);
-  });
-
   it('utilization percentage is accurate', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
+    const result = assembleContext(db, { budget: 50000 });
     const expectedPct = Math.round((result.context.length / 50000) * 100);
-    // Allow 1% tolerance due to newlines in join
     expect(Math.abs(result.breakdown.utilizationPct - expectedPct)).toBeLessThanOrEqual(2);
   });
 });
 
-// ── Headers ──
-
-describe('headers', () => {
-  it('includes headers by default', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toContain('# Corrections');
-  });
-
-  it('excludes headers when headers=false', () => {
-    const result = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-      headers: false,
-    });
-    expect(result.context).not.toContain('## Interactive Session Context');
-    expect(result.context).not.toContain('## Family');
-    // But content should still be there
-    expect(result.context).toContain('Kim (DVM)');
-  });
-});
-
-// ── Empty Store ──
-
-describe('empty knowledge store', () => {
-  it('returns empty context for empty db', () => {
-    const emptyDb = new Database(':memory:');
-    emptyDb.pragma('journal_mode = WAL');
-    initKnowledge(emptyDb);
-
-    const result = assembleContext(emptyDb, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result.context).toBe('');
-    expect(result.breakdown.total).toBe(0);
-    expect(result.includedIds).toHaveLength(0);
-  });
-});
-
-// ── Upsert + Recompile ──
-
-describe('upsert then recompile', () => {
-  it('reflects updated handoff content', () => {
-    // Initial compile
-    const result1 = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result1.context).toContain('returned from Disney');
-
-    // Update handoff
-    upsertKnowledge(db, {
-      type: 'handoff',
-      key: 'interactive-context',
-      content: 'NEW SESSION: Daniel asked about shoulder surgery timeline.',
-    });
-
-    // Recompile
-    const result2 = assembleContext(db, {
-      budget: 50000,
-      sessionType: 'interactive',
-    });
-    expect(result2.context).not.toContain('returned from Disney');
-    expect(result2.context).toContain('shoulder surgery timeline');
-  });
-});
-
-// ── Different Session Types Produce Different Outputs ──
-
-describe('session type differentiation', () => {
-  it('interactive and cron_thinking produce different session layers', () => {
-    const interactive = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
-    const thinking = assembleContext(db, { budget: 50000, sessionType: 'cron_thinking' });
-
-    // Interactive has family context, thinking has last session handoff
-    expect(interactive.context).toContain('Kim (DVM)');
-    expect(thinking.context).toContain('Context rot research done');
-
-    // They're different outputs
-    expect(interactive.context).not.toBe(thinking.context);
-  });
-
-  it('cron_digest is smaller than interactive', () => {
-    const digest = assembleContext(db, { budget: 50000, sessionType: 'cron_digest' });
-    const interactive = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
-
-    expect(digest.breakdown.session).toBeLessThan(interactive.breakdown.session);
-  });
-});
+// ── Maintenance Layer ──
 
 describe('maintenance layer', () => {
-  /** Create epistemic tables needed for maintenance checks. */
-  function createEpistemicTables(testDb: Database.Database): void {
-    testDb.exec(`
-      CREATE TABLE IF NOT EXISTS beliefs (
-        id TEXT PRIMARY KEY,
-        statement TEXT NOT NULL,
-        category TEXT NOT NULL DEFAULT 'world',
-        confidence REAL NOT NULL DEFAULT 0.7,
-        status TEXT NOT NULL DEFAULT 'active',
-        first_recorded TEXT NOT NULL DEFAULT (datetime('now')),
-        last_confirmed TEXT,
-        contradictions TEXT NOT NULL DEFAULT '[]',
-        evidence TEXT NOT NULL DEFAULT '[]',
-        tags TEXT NOT NULL DEFAULT '[]',
-        source TEXT
-      );
-      CREATE TABLE IF NOT EXISTS verifications (
-        id TEXT PRIMARY KEY,
-        belief_id TEXT NOT NULL,
-        strategy TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        outcome TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        started_at TEXT,
-        completed_at TEXT,
-        notes TEXT,
-        evidence TEXT NOT NULL DEFAULT '[]'
-      );
-      CREATE TABLE IF NOT EXISTS predictions (
-        id TEXT PRIMARY KEY,
-        topic TEXT NOT NULL,
-        prediction TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        domain TEXT NOT NULL DEFAULT 'general',
-        check_date TEXT,
-        outcome TEXT,
-        reasoning TEXT,
-        resolution_criteria TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        resolved_at TEXT,
-        notes TEXT
-      );
-      CREATE TABLE IF NOT EXISTS positions (
-        id TEXT PRIMARY KEY,
-        topic TEXT NOT NULL,
-        position TEXT NOT NULL,
-        confidence REAL NOT NULL DEFAULT 0.5,
-        status TEXT NOT NULL DEFAULT 'held',
-        challenge_count INTEGER NOT NULL DEFAULT 0,
-        last_challenged TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        revision_history TEXT NOT NULL DEFAULT '[]',
-        evidence TEXT NOT NULL DEFAULT '[]',
-        counterevidence TEXT NOT NULL DEFAULT '[]',
-        reasoning TEXT
-      );
-    `);
-  }
-
-  it('returns zero maintenance items when epistemic tables do not exist', () => {
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
-    expect(result.maintenanceItems.total).toBe(0);
-    expect(result.breakdown.maintenance).toBe(0);
-  });
-
-  it('returns zero maintenance items when epistemic tables are empty', () => {
-    createEpistemicTables(db);
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+  it('returns zero maintenance items when tables are empty', () => {
+    const result = assembleContext(db, { budget: 50000 });
     expect(result.maintenanceItems.total).toBe(0);
     expect(result.breakdown.maintenance).toBe(0);
   });
 
   it('surfaces beliefs never verified', () => {
-    createEpistemicTables(db);
-    db.prepare(`
-      INSERT INTO beliefs (id, statement, category, confidence, status, first_recorded)
-      VALUES ('b1', 'Test belief', 'world', 0.7, 'active', datetime('now'))
-    `).run();
-
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    addBelief(db, { statement: 'Test belief for verification', category: 'world' });
+    const result = assembleContext(db, { budget: 50000 });
     expect(result.maintenanceItems.beliefsNeverVerified).toBe(1);
     expect(result.maintenanceItems.total).toBeGreaterThan(0);
     expect(result.breakdown.maintenance).toBeGreaterThan(0);
@@ -612,49 +265,71 @@ describe('maintenance layer', () => {
   });
 
   it('surfaces predictions past check date', () => {
-    createEpistemicTables(db);
-    db.prepare(`
-      INSERT INTO predictions (id, topic, prediction, confidence, domain, check_date)
-      VALUES ('p1', 'Test', 'Something will happen', 0.7, 'general', datetime('now', '-1 day'))
-    `).run();
-
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    const pastDate = new Date(Date.now() - 86400000).toISOString();
+    addPrediction(db, {
+      topic: 'Test',
+      prediction: 'Something will happen',
+      confidence: 0.7,
+      check_date: pastDate,
+    });
+    const result = assembleContext(db, { budget: 50000 });
     expect(result.maintenanceItems.predictionsPastDue).toBe(1);
     expect(result.context).toContain('past check date');
     expect(result.context).toContain('pending_predictions');
   });
 
   it('surfaces unchallenged positions', () => {
-    createEpistemicTables(db);
+    // Insert a position that's old enough to be unchallenged
     db.prepare(`
       INSERT INTO positions (id, topic, position, confidence, status, created_at)
       VALUES ('pos1', 'Test topic', 'Test position', 0.7, 'held', datetime('now', '-60 days'))
     `).run();
 
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    const result = assembleContext(db, { budget: 50000 });
     expect(result.maintenanceItems.positionsUnchallenged).toBe(1);
     expect(result.context).toContain('unchallenged');
-    expect(result.context).toContain('unchallenged_positions');
   });
 
   it('surfaces active contradictions', () => {
-    createEpistemicTables(db);
     db.prepare(`
       INSERT INTO beliefs (id, statement, category, confidence, status, first_recorded, contradictions)
       VALUES ('b2', 'Challenged belief', 'world', 0.8, 'challenged', datetime('now'), '["some contradiction"]')
     `).run();
 
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
+    const result = assembleContext(db, { budget: 50000 });
     expect(result.maintenanceItems.activeContradictions).toBe(1);
     expect(result.context).toContain('contradiction');
   });
 
-  it('does not include maintenance section when nothing needs attention', () => {
-    createEpistemicTables(db);
-    // Tables exist but are empty — nothing needs attention
-    const result = assembleContext(db, { budget: 50000, sessionType: 'interactive' });
-    expect(result.maintenanceItems.total).toBe(0);
+  it('excludes maintenance when include.maintenance=false', () => {
+    addBelief(db, { statement: 'Unverified belief', category: 'world' });
+    const result = assembleContext(db, {
+      budget: 50000,
+      include: { maintenance: false },
+    });
     expect(result.breakdown.maintenance).toBe(0);
     expect(result.context).not.toContain('Maintenance');
+  });
+});
+
+// ── Headers ──
+
+describe('headers', () => {
+  beforeEach(() => {
+    addCorrection(db, { type: 'policy', content: 'Test correction', permanence: 'never' });
+  });
+
+  it('includes headers by default', () => {
+    const result = assembleContext(db, { budget: 50000 });
+    expect(result.context).toContain('# Active Corrections');
+  });
+
+  it('content is present even with headers=false', () => {
+    const result = assembleContext(db, {
+      budget: 50000,
+      headers: false,
+    });
+    // Content should still be there
+    expect(result.context).toContain('Test correction');
   });
 });

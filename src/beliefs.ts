@@ -15,7 +15,7 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { resolveId } from './db.js';
+import { resolveId, runMigration } from './db.js';
 
 // ── Types ──
 
@@ -140,10 +140,11 @@ const SCHEMA = `
   );
 `;
 
-const MIGRATIONS = [
-  // Add sensitivity column if it doesn't exist (for existing databases)
-  `ALTER TABLE beliefs ADD COLUMN sensitivity TEXT DEFAULT 'approximate' CHECK (sensitivity IN ('personal', 'institutional', 'approximate'))`,
-];
+const INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_beliefs_status ON beliefs(status);
+  CREATE INDEX IF NOT EXISTS idx_beliefs_last_confirmed ON beliefs(last_confirmed);
+  CREATE INDEX IF NOT EXISTS idx_beliefs_category ON beliefs(category);
+`;
 
 // ── Helpers ──
 
@@ -182,16 +183,14 @@ const STOP_WORDS = new Set([
  */
 export function initBeliefs(db: Database.Database): void {
   db.exec(SCHEMA);
+  db.exec(INDEXES);
 
-  // Run migrations for existing databases
-  for (const migration of MIGRATIONS) {
-    try {
-      db.exec(migration);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '';
-      if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw err;
-    }
-  }
+  // Migration: add sensitivity column to existing databases
+  runMigration(
+    db,
+    'beliefs_add_sensitivity',
+    `ALTER TABLE beliefs ADD COLUMN sensitivity TEXT DEFAULT 'approximate' CHECK (sensitivity IN ('personal', 'institutional', 'approximate'))`,
+  );
 }
 
 /**

@@ -1,10 +1,12 @@
 // F9 — Corrections (self-verification)
 export {
   initDb,
+  runMigration,
   resolveId,
   addCorrection,
   getCorrection,
   listCorrections,
+  searchCorrections,
   recordViolation,
   graduateCorrection,
   deleteCorrection,
@@ -63,6 +65,7 @@ export {
 
 export type {
   Prediction,
+  PredictionRevision,
   Domain,
   Outcome,
   AddPredictionInput,
@@ -169,12 +172,9 @@ export type { DashboardData } from './dashboard.js';
 // F10 — Context Compiler
 export {
   assembleContext,
-  DEFAULT_SESSION_LAYERS,
 } from './compiler.js';
 
 export type {
-  SessionType,
-  SessionLayerItem,
   AssembleContextOpts,
   AssembleContextResult,
   MaintenanceItems,

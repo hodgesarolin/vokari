@@ -362,22 +362,25 @@ export function updateKnowledge(
   id: string,
   updates: { content?: string; metadata?: Record<string, unknown> },
 ): Knowledge | undefined {
-  const existing = getKnowledge(db, id);
-  if (!existing) return undefined;
+  const txn = db.transaction(() => {
+    const existing = getKnowledge(db, id);
+    if (!existing) return undefined;
 
-  const now = new Date().toISOString();
-  const newContent = updates.content ?? existing.content;
-  const newMetadata = updates.metadata
-    ? JSON.stringify(updates.metadata)
-    : JSON.stringify(existing.metadata);
+    const now = new Date().toISOString();
+    const newContent = updates.content ?? existing.content;
+    const newMetadata = updates.metadata
+      ? JSON.stringify(updates.metadata)
+      : JSON.stringify(existing.metadata);
 
-  db.prepare(`
-    UPDATE knowledge
-    SET content = ?, metadata = ?, updated_at = ?
-    WHERE id = ?
-  `).run(newContent, newMetadata, now, id);
+    db.prepare(`
+      UPDATE knowledge
+      SET content = ?, metadata = ?, updated_at = ?
+      WHERE id = ?
+    `).run(newContent, newMetadata, now, id);
 
-  return getKnowledge(db, id);
+    return getKnowledge(db, id);
+  });
+  return txn();
 }
 
 /**
@@ -390,35 +393,38 @@ export function upsertKnowledge(
   db: Database.Database,
   input: UpsertKnowledgeInput,
 ): string {
-  const now = new Date().toISOString();
-  const metadataStr = JSON.stringify(input.metadata ?? {});
+  const txn = db.transaction(() => {
+    const now = new Date().toISOString();
+    const metadataStr = JSON.stringify(input.metadata ?? {});
 
-  // Try to find existing row by type + key
-  const existing = db.prepare(
-    'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ?'
-  ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
+    // Try to find existing row by type + key
+    const existing = db.prepare(
+      'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ?'
+    ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
 
-  if (existing) {
-    // Update existing row
+    if (existing) {
+      // Update existing row
+      db.prepare(`
+        UPDATE knowledge
+        SET content = ?, metadata = ?, updated_at = ?
+        WHERE id = ?
+      `).run(input.content, metadataStr, now, existing.id);
+      return existing.id;
+    }
+
+    // Create new row
+    const id = randomUUID();
+    // Default: handoff and context types are mutable
+    const mutable = input.type === 'handoff' || input.type === 'context' ? 1 : 0;
+
     db.prepare(`
-      UPDATE knowledge
-      SET content = ?, metadata = ?, updated_at = ?
-      WHERE id = ?
-    `).run(input.content, metadataStr, now, existing.id);
-    return existing.id;
-  }
+      INSERT INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, input.type, input.key, input.content, metadataStr, now, now, mutable);
 
-  // Create new row
-  const id = randomUUID();
-  // Default: handoff and context types are mutable
-  const mutable = input.type === 'handoff' || input.type === 'context' ? 1 : 0;
-
-  db.prepare(`
-    INSERT INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, input.type, input.key, input.content, metadataStr, now, now, mutable);
-
-  return id;
+    return id;
+  });
+  return txn();
 }
 
 /**

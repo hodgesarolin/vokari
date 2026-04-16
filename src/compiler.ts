@@ -1,48 +1,47 @@
 /**
  * Context Compiler for Vokari.
  *
- * Dynamically assembles a context window from the unified knowledge store.
- * Four layers:
- * 1. MANDATORY — always included (corrections, identity, decisions)
+ * Dynamically assembles a context window from epistemic data.
+ * Three layers:
+ * 1. MANDATORY — corrections, beliefs, positions (configurable via include flags)
  * 2. MAINTENANCE — health/status alerts when epistemic items need attention
- * 3. SESSION — varies by session type (interactive, cron_thinking, cron_digest)
- * 4. RELEVANCE — fills remaining budget via hybrid search (FTS5 + optional vector)
+ * 3. RELEVANCE — fills remaining budget via FTS5 search (query-driven only)
  *
  * Key properties:
  * - Budget-aware: never exceeds the character limit
- * - Deterministic base: mandatory + session layers are stable (cacheable)
+ * - Deterministic base: mandatory layer is stable (cacheable)
  * - Dynamic tail: relevance layer adapts to the conversation
- * - Source-agnostic: pulls from knowledge table regardless of origin
  * - Self-maintaining: maintenance layer surfaces overdue verifications,
- *   pending predictions, and unchallenged positions without cron dependency
+ *   pending predictions, and unchallenged positions
  */
 
 import type Database from 'better-sqlite3';
+import { getContext as getCorrectionContext } from './db.js';
+import { getBeliefContext } from './beliefs.js';
+import { getPositionContext } from './positions.js';
+import { getPendingReview } from './predictions.js';
 import {
-  listKnowledge,
-  listKnowledgeInternal,
   searchKnowledge,
-  getKnowledgeByKey,
-  MetadataFilter,
-  OrderBy,
+  getKnowledgeStats,
 } from './knowledge.js';
-import type { KnowledgeType, Knowledge, MetadataFilter as MetadataFilterType } from './knowledge.js';
 
 // ── Types ──
-
-export type SessionType = string;
 
 export interface AssembleContextOpts {
   /** Max characters for the assembled context. */
   budget: number;
-  /** Session type determines which knowledge is included. */
-  sessionType: SessionType;
-  /** Optional query for relevance-based retrieval in the third layer. */
+  /** Which epistemic modules to include. All default to true except predictions. */
+  include?: {
+    corrections?: boolean;  // default: true
+    beliefs?: boolean;      // default: true
+    positions?: boolean;    // default: true
+    predictions?: boolean;  // default: false
+    maintenance?: boolean;  // default: true
+  };
+  /** Optional query for relevance-based retrieval in the final layer. */
   query?: string;
   /** Include section headers in output (default: true). */
   headers?: boolean;
-  /** Custom session layer configs. If provided, overrides the built-in defaults. */
-  sessionLayers?: Record<string, SessionLayerItem[]>;
 }
 
 export interface AssembleContextResult {
@@ -52,14 +51,11 @@ export interface AssembleContextResult {
   breakdown: {
     mandatory: number;
     maintenance: number;
-    session: number;
     relevance: number;
     total: number;
     budget: number;
     utilizationPct: number;
   };
-  /** IDs of knowledge rows included. */
-  includedIds: string[];
   /** Number of rows considered but excluded (budget). */
   excluded: number;
   /** Maintenance items found (even if not included in context due to budget). */
@@ -76,67 +72,15 @@ export interface MaintenanceItems {
   total: number;
 }
 
-interface LayerEntry {
-  id: string;
-  header?: string;
-  content: string;
-  priority: number; // lower = more important
-}
-
-// ── Session Layer Configs ──
-
-/**
- * Defines which knowledge types/keys to include for each session type.
- * Each entry specifies: type filter, optional key, optional metadata filter,
- * and priority (lower = included first).
- */
-export interface SessionLayerItem {
-  type: KnowledgeType;
-  key?: string;
-  /** Branded metadata filter — must be created via MetadataFilter() from the registry. */
-  metadataFilter?: MetadataFilterType;
-  priority: number;
-  header?: string;
-  limit?: number;
-}
-
-/**
- * Default session layer configs. These are Brain-specific defaults.
- * Override by passing `sessionLayers` to `assembleContext()`.
- */
-export const DEFAULT_SESSION_LAYERS: Record<string, SessionLayerItem[]> = {
-  interactive: [
-    { type: 'handoff', key: 'interactive-context', priority: 10, header: '## Interactive Session Context' },
-    { type: 'context', key: 'family', priority: 20, header: '## Family' },
-    { type: 'context', key: 'personal', priority: 25, header: '## Personal Context' },
-    { type: 'handoff', key: 'daily-todos', priority: 30, header: '## Daily Todos' },
-    { type: 'prediction', priority: 40, header: '## Active Predictions', metadataFilter: MetadataFilter('outcome_pending'), limit: 20 },
-    { type: 'position', priority: 50, header: '## Active Positions', metadataFilter: MetadataFilter('status_held_or_challenged'), limit: 30 },
-  ],
-  cron_thinking: [
-    { type: 'handoff', key: 'last-session-handoff', priority: 10, header: '## Last Session Handoff' },
-    { type: 'handoff', key: 'nightly-state', priority: 15, header: '## Nightly State' },
-    { type: 'position', priority: 20, header: '## Active Positions', metadataFilter: MetadataFilter('status_held_or_challenged'), limit: 30 },
-    { type: 'prediction', priority: 30, header: '## Active Predictions', metadataFilter: MetadataFilter('outcome_pending'), limit: 20 },
-  ],
-  cron_digest: [
-    // Minimal: just corrections (mandatory) + identity + recent events
-    { type: 'handoff', key: 'daily-todos', priority: 10, header: '## Daily Todos' },
-  ],
-  cron_health: [
-    { type: 'handoff', key: 'nightly-state', priority: 10, header: '## System State' },
-  ],
-};
-
 // ── Main API ──
 
 /**
- * Assemble a context window from the knowledge store.
+ * Assemble a context window from epistemic data.
  *
  * Three-layer approach:
- * 1. Mandatory: corrections + identity + decisions (always included)
- * 2. Session: type-specific knowledge (varies by session_type)
- * 3. Relevance: fills remaining budget with search results
+ * 1. Mandatory: corrections + beliefs + positions (configurable)
+ * 2. Maintenance: epistemic health alerts
+ * 3. Relevance: fills remaining budget with search results (query-driven)
  */
 export function assembleContext(
   db: Database.Database,
@@ -144,119 +88,115 @@ export function assembleContext(
 ): AssembleContextResult {
   const {
     budget,
-    sessionType,
+    include = {},
     query,
     headers = true,
-    sessionLayers,
   } = opts;
 
-  const includedIds: string[] = [];
-  const includedIdSet = new Set<string>(); // For fast dedup lookups
+  const includeCorrections = include.corrections ?? true;
+  const includeBeliefs = include.beliefs ?? true;
+  const includePositions = include.positions ?? true;
+  const includePredictions = include.predictions ?? false;
+  const includeMaintenance = include.maintenance ?? true;
+
   const sections: string[] = [];
   let usedChars = 0;
   let excluded = 0;
 
   /**
    * Try to add a section. Returns true if added, false if over budget.
-   * Accounts for the separator that join('\n') will add.
    */
-  function tryAdd(text: string, ids: string[]): boolean {
-    const separatorCost = sections.length > 0 ? 1 : 0; // '\n' between sections
+  function tryAdd(text: string): boolean {
+    const separatorCost = sections.length > 0 ? 1 : 0;
     if (usedChars + text.length + separatorCost <= budget) {
       sections.push(text);
       usedChars += text.length + separatorCost;
-      for (const id of ids) {
-        includedIds.push(id);
-        // Track individual IDs even from comma-joined entries
-        for (const subId of id.split(',')) {
-          includedIdSet.add(subId);
-        }
-      }
       return true;
     }
+    excluded++;
     return false;
   }
 
   // ── Layer 1: MANDATORY ──
 
-  const mandatoryEntries = getMandatoryLayer(db);
   const mandatoryStart = usedChars;
 
-  for (const entry of mandatoryEntries) {
-    const text = formatEntry(entry, headers);
-    if (!tryAdd(text, [entry.id])) {
-      excluded++;
+  // 1a. Corrections
+  if (includeCorrections) {
+    const correctionBudget = Math.floor(budget * 0.4);
+    const ctx = safeCall(() => getCorrectionContext(db, correctionBudget));
+    if (ctx && hasContent(ctx)) {
+      tryAdd(ctx);
+    }
+  }
+
+  // 1b. Beliefs
+  if (includeBeliefs) {
+    const beliefBudget = Math.floor((budget - usedChars) * 0.4);
+    const ctx = safeCall(() => getBeliefContext(db, beliefBudget));
+    if (ctx && hasContent(ctx)) {
+      tryAdd(`\n${ctx}\n`);
+    }
+  }
+
+  // 1c. Positions
+  if (includePositions) {
+    const posBudget = Math.floor((budget - usedChars) * 0.5);
+    const ctx = safeCall(() => getPositionContext(db, posBudget));
+    if (ctx && hasContent(ctx)) {
+      tryAdd(`\n${ctx}\n`);
+    }
+  }
+
+  // 1d. Predictions (opt-in)
+  if (includePredictions) {
+    const pending = safeCall(() => getPendingReview(db)) ?? [];
+    if (pending.length > 0) {
+      const predLines = pending.slice(0, 10).map(p =>
+        `- ${p.prediction} (${Math.round(p.confidence * 100)}%, check: ${p.check_date ?? 'unset'})`
+      );
+      const predText = headers
+        ? `\n# Pending Predictions\n${predLines.join('\n')}\n`
+        : `\n${predLines.join('\n')}\n`;
+      tryAdd(predText);
     }
   }
 
   const mandatorySize = usedChars - mandatoryStart;
 
-  // ── Layer 1.5: MAINTENANCE ──
+  // ── Layer 2: MAINTENANCE ──
 
   const maintenanceItems = getMaintenanceItems(db);
   const maintenanceStart = usedChars;
 
-  if (maintenanceItems.total > 0) {
+  if (includeMaintenance && maintenanceItems.total > 0) {
     const maintenanceText = formatMaintenanceSection(maintenanceItems, headers);
-    // Maintenance section is compact — always try to include it
-    tryAdd(maintenanceText, []);
+    tryAdd(maintenanceText);
   }
 
   const maintenanceSize = usedChars - maintenanceStart;
 
-  // ── Layer 2: SESSION ──
-
-  const sessionEntries = getSessionLayer(db, sessionType, sessionLayers);
-  const sessionStart = usedChars;
-
-  for (const entry of sessionEntries) {
-    const text = formatEntry(entry, headers);
-    if (!tryAdd(text, [entry.id])) {
-      excluded++;
-    }
-  }
-
-  const sessionSize = usedChars - sessionStart;
-
-  // ── Layer 3: RELEVANCE ──
+  // ── Layer 3: RELEVANCE (query-driven only) ──
 
   const relevanceStart = usedChars;
   const remainingBudget = budget - usedChars;
 
   if (remainingBudget > 200 && query) {
-    // Search for relevant content
-    const searchResults = searchKnowledge(db, query, {
-      limit: 20,
+    // Check if knowledge table exists before searching
+    const hasKnowledge = safeCall(() => {
+      getKnowledgeStats(db);
+      return true;
     });
 
-    for (const result of searchResults) {
-      if (includedIdSet.has(result.id)) continue;
+    if (hasKnowledge) {
+      const searchResults = searchKnowledge(db, query, { limit: 20 });
 
-      const text = headers
-        ? `\n### [${result.type}] ${result.key ?? ''}\n${result.content}\n`
-        : `\n${result.content}\n`;
+      for (const result of searchResults) {
+        const text = headers
+          ? `\n### [${result.type}] ${result.key ?? ''}\n${result.content}\n`
+          : `\n${result.content}\n`;
 
-      if (!tryAdd(text, [result.id])) {
-        excluded++;
-      }
-    }
-  } else if (remainingBudget > 200 && !query) {
-    // No query — fill with recent/high-relevance content
-    const recentItems = listKnowledge(db, {
-      types: ['research', 'context', 'archive', 'daily'],
-      limit: 10,
-      orderBy: OrderBy('updated_desc'),
-    });
-
-    for (const item of recentItems) {
-      if (includedIdSet.has(item.id)) continue;
-
-      const text = headers
-        ? `\n### [${item.type}] ${item.key ?? ''}\n${item.content}\n`
-        : `\n${item.content}\n`;
-
-      if (!tryAdd(text, [item.id])) {
-        excluded++;
+        if (!tryAdd(text)) break;
       }
     }
   }
@@ -268,141 +208,38 @@ export function assembleContext(
     breakdown: {
       mandatory: mandatorySize,
       maintenance: maintenanceSize,
-      session: sessionSize,
       relevance: relevanceSize,
       total: usedChars,
       budget,
       utilizationPct: budget > 0 ? Math.round((usedChars / budget) * 100) : 0,
     },
-    includedIds,
     excluded,
     maintenanceItems,
   };
 }
 
-// ── Layer Builders ──
+// ── Helpers ──
 
-/**
- * Mandatory layer: corrections + identity + decisions.
- * Always included regardless of session type.
- */
-function getMandatoryLayer(db: Database.Database): LayerEntry[] {
-  const entries: LayerEntry[] = [];
-
-  // 1. Active corrections (highest priority)
-  const corrections = listKnowledgeInternal(db, {
-    type: 'correction',
-    metadataFilter: MetadataFilter('not_graduated'),
-  });
-
-  if (corrections.length > 0) {
-    // Group by correction_type, ordered by priority
-    const typeOrder = ['policy', 'fact', 'pattern', 'technical'];
-    const grouped = new Map<string, Knowledge[]>();
-
-    for (const c of corrections) {
-      const ct = (c.metadata.correction_type as string) ?? 'other';
-      if (!grouped.has(ct)) grouped.set(ct, []);
-      grouped.get(ct)!.push(c);
-    }
-
-    let correctionText = '# Corrections\n';
-    for (const type of typeOrder) {
-      const items = grouped.get(type);
-      if (!items || items.length === 0) continue;
-      const perm = items[0].metadata.permanence === 'never' ? ' (permanent)' : '';
-      correctionText += `\n## ${type.charAt(0).toUpperCase() + type.slice(1)}${perm}\n`;
-      for (const item of items) {
-        const violations = (item.metadata.violation_count as number) ?? 0;
-        const violStr = violations > 0 ? ` [${violations} violations]` : '';
-        correctionText += `- ${item.content}${violStr}\n`;
-      }
-    }
-
-    entries.push({
-      id: corrections.map(c => c.id).join(','),
-      header: '# Corrections',
-      content: correctionText,
-      priority: 0,
-    });
+/** Call a function, returning undefined if the table doesn't exist. */
+function safeCall<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
   }
-
-  // 2. Core identity
-  const identity = getKnowledgeByKey(db, 'context', 'identity');
-  if (identity) {
-    entries.push({
-      id: identity.id,
-      header: '# Identity',
-      content: identity.content,
-      priority: 1,
-    });
-  }
-
-  // 3. Key decisions
-  const decisions = getKnowledgeByKey(db, 'context', 'decisions');
-  if (decisions) {
-    entries.push({
-      id: decisions.id,
-      header: '# Key Decisions',
-      content: decisions.content,
-      priority: 2,
-    });
-  }
-
-  return entries.sort((a, b) => a.priority - b.priority);
 }
 
 /**
- * Session layer: varies by session type.
+ * Check if a context string has actual data content beyond just headers.
+ * Returns false for empty or header-only blocks like "# Beliefs\n\nNo active beliefs recorded."
  */
-function getSessionLayer(
-  db: Database.Database,
-  sessionType: SessionType,
-  customLayers?: Record<string, SessionLayerItem[]>,
-): LayerEntry[] {
-  const entries: LayerEntry[] = [];
-  const layers = customLayers ?? DEFAULT_SESSION_LAYERS;
-  const layerConfig = layers[sessionType] ?? [];
-
-  for (const item of layerConfig) {
-    if (item.key) {
-      // Specific key lookup
-      const knowledge = getKnowledgeByKey(db, item.type, item.key);
-      if (knowledge) {
-        entries.push({
-          id: knowledge.id,
-          header: item.header,
-          content: knowledge.content,
-          priority: item.priority,
-        });
-      }
-    } else {
-      // Type-based listing with optional metadata filter (internal — hardcoded filters only)
-      const items = listKnowledgeInternal(db, {
-        type: item.type,
-        metadataFilter: item.metadataFilter,
-        limit: item.limit ?? 50,
-      });
-
-      if (items.length > 0) {
-        const content = items.map(k => {
-          const conf = k.metadata.confidence !== undefined
-            ? ` (${Math.round((k.metadata.confidence as number) * 100)}%)`
-            : '';
-          return `- ${k.content}${conf}`;
-        }).join('\n');
-
-        entries.push({
-          id: items.map(k => k.id).join(','),
-          header: item.header,
-          content: content,
-          priority: item.priority,
-        });
-      }
-    }
-  }
-
-  return entries.sort((a, b) => a.priority - b.priority);
+function hasContent(text: string): boolean {
+  // Strip markdown headers and whitespace
+  const stripped = text
+    .replace(/^#+ .+$/gm, '')
+    .replace(/No active (beliefs|positions|corrections) recorded\.?/gi, '')
+    .trim();
+  return stripped.length > 0;
 }
 
 // ── Maintenance Layer ──
@@ -410,29 +247,18 @@ function getSessionLayer(
 /**
  * Read-only health check: counts epistemic items needing attention.
  * No side effects — does not create verification records or modify state.
- * Gracefully returns zero counts if epistemic tables don't exist
- * (e.g., when only the knowledge store is initialized).
+ * Gracefully returns zero counts if epistemic tables don't exist.
  */
 function getMaintenanceItems(db: Database.Database): MaintenanceItems {
-  const empty: MaintenanceItems = {
-    beliefsNeverVerified: 0,
-    beliefsStale: 0,
-    predictionsPastDue: 0,
-    positionsUnchallenged: 0,
-    activeContradictions: 0,
-    total: 0,
-  };
-
   /** Safe count query — returns 0 if table doesn't exist. */
   function safeCount(sql: string): number {
     try {
       return (db.prepare(sql).get() as { c: number }).c;
     } catch {
-      return 0; // Table doesn't exist
+      return 0;
     }
   }
 
-  // 1. Beliefs never verified
   const beliefsNeverVerified = safeCount(`
     SELECT COUNT(*) as c FROM beliefs
     WHERE status IN ('active', 'challenged')
@@ -442,7 +268,6 @@ function getMaintenanceItems(db: Database.Database): MaintenanceItems {
       )
   `);
 
-  // 2. Beliefs verified but stale (>7 days since last confirmation)
   const beliefsStale = safeCount(`
     SELECT COUNT(*) as c FROM beliefs
     WHERE status IN ('active', 'challenged')
@@ -450,7 +275,6 @@ function getMaintenanceItems(db: Database.Database): MaintenanceItems {
       AND last_confirmed <= datetime('now', '-7 days')
   `);
 
-  // 3. Predictions past their check date
   const predictionsPastDue = safeCount(`
     SELECT COUNT(*) as c FROM predictions
     WHERE outcome IS NULL
@@ -458,7 +282,6 @@ function getMaintenanceItems(db: Database.Database): MaintenanceItems {
       AND check_date <= datetime('now')
   `);
 
-  // 4. Positions unchallenged for >30 days
   const positionsUnchallenged = safeCount(`
     SELECT COUNT(*) as c FROM positions
     WHERE status IN ('held', 'challenged')
@@ -468,7 +291,6 @@ function getMaintenanceItems(db: Database.Database): MaintenanceItems {
       )
   `);
 
-  // 5. Active contradictions (beliefs with unresolved contradictions)
   const activeContradictions = safeCount(`
     SELECT COUNT(*) as c FROM beliefs
     WHERE status = 'challenged'
@@ -490,7 +312,6 @@ function getMaintenanceItems(db: Database.Database): MaintenanceItems {
 
 /**
  * Format maintenance items as a compact context section.
- * Includes actionable tool call hints so any agent knows how to address items.
  */
 function formatMaintenanceSection(items: MaintenanceItems, includeHeaders: boolean): string {
   const lines: string[] = [];
@@ -518,7 +339,6 @@ function formatMaintenanceSection(items: MaintenanceItems, includeHeaders: boole
 
   lines.push(alerts.join(' · '));
 
-  // Add tool hints for resolution
   const hints: string[] = [];
   if (items.beliefsNeverVerified > 0 || items.beliefsStale > 0) {
     hints.push('`verification_tick` to review beliefs');
@@ -534,17 +354,4 @@ function formatMaintenanceSection(items: MaintenanceItems, includeHeaders: boole
   }
 
   return lines.join('\n');
-}
-
-// ── Formatting ──
-
-function formatEntry(entry: LayerEntry, includeHeaders: boolean): string {
-  if (includeHeaders && entry.header) {
-    // If the content already starts with a markdown header, don't add another
-    if (entry.content.startsWith('#')) {
-      return `\n${entry.content}\n`;
-    }
-    return `\n${entry.header}\n${entry.content}\n`;
-  }
-  return `\n${entry.content}\n`;
 }

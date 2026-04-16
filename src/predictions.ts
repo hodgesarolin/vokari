@@ -5,6 +5,14 @@ import { resolveId } from './db.js';
 export type Domain = 'political' | 'technical' | 'behavioral' | 'market' | 'general';
 export type Outcome = 'correct' | 'incorrect' | 'partial' | 'voided';
 
+export interface PredictionRevision {
+  previous_prediction: string;
+  previous_confidence: number;
+  previous_reasoning: string | null;
+  reason: string;
+  revised_at: string;
+}
+
 export interface Prediction {
   id: string;
   topic: string;
@@ -19,6 +27,7 @@ export interface Prediction {
   resolved_at: string | null;
   created_at: string;
   supersedes: string | null;
+  revision_history: PredictionRevision[];
 }
 
 export interface AddPredictionInput {
@@ -77,12 +86,47 @@ const SCHEMA = `
     outcome_notes TEXT,
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    supersedes TEXT
+    supersedes TEXT,
+    revision_history TEXT DEFAULT '[]'
   );
 `;
 
+const INDEXES = `
+  CREATE INDEX IF NOT EXISTS idx_predictions_check_date ON predictions(check_date);
+  CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
+  CREATE INDEX IF NOT EXISTS idx_predictions_domain ON predictions(domain);
+`;
+
+/** Safe JSON parse — returns fallback on malformed data. */
+function safeJsonParse<T>(json: string | null | undefined, fallback: T): T {
+  if (!json) return fallback;
+  try { return JSON.parse(json) as T; }
+  catch { return fallback; }
+}
+
+/** Raw row from SQLite before JSON parsing. */
+interface PredictionRow extends Omit<Prediction, 'revision_history'> {
+  revision_history: string;
+}
+
+function rowToPrediction(row: PredictionRow): Prediction {
+  return {
+    ...row,
+    revision_history: safeJsonParse<PredictionRevision[]>(row.revision_history, []),
+  };
+}
+
 export function initPredictions(db: Database.Database): void {
   db.exec(SCHEMA);
+  db.exec(INDEXES);
+
+  // Migration: add revision_history column to existing databases
+  try {
+    db.exec(`ALTER TABLE predictions ADD COLUMN revision_history TEXT DEFAULT '[]'`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw err;
+  }
 }
 
 export function addPrediction(db: Database.Database, input: AddPredictionInput): string {
@@ -107,7 +151,8 @@ export function addPrediction(db: Database.Database, input: AddPredictionInput):
 export function getPrediction(db: Database.Database, id: string): Prediction | undefined {
   const resolved = resolveId(db, 'predictions', id);
   if (!resolved) return undefined;
-  return db.prepare('SELECT * FROM predictions WHERE id = ?').get(resolved) as Prediction | undefined;
+  const row = db.prepare('SELECT * FROM predictions WHERE id = ?').get(resolved) as PredictionRow | undefined;
+  return row ? rowToPrediction(row) : undefined;
 }
 
 export function listPredictions(db: Database.Database, opts?: ListPredictionsOpts): Prediction[] {
@@ -128,40 +173,51 @@ export function listPredictions(db: Database.Database, opts?: ListPredictionsOpt
   const limit = opts?.limit ?? 100;
   sql += ' LIMIT ?';
   params.push(limit);
-  return db.prepare(sql).all(...params) as Prediction[];
+  const rows = db.prepare(sql).all(...params) as PredictionRow[];
+  return rows.map(rowToPrediction);
 }
 
 /**
- * Revise an unresolved prediction — update the prediction text, confidence,
- * or reasoning before resolution. Creates a new prediction that supersedes
- * the original so the original is preserved for calibration history.
+ * Revise an unresolved prediction in-place. Records the previous state
+ * in revision_history for audit trail. Mirrors revise_belief and
+ * revise_position patterns.
  *
- * Returns the new prediction ID, or undefined if the original wasn't found
- * or was already resolved.
+ * Returns the prediction ID, or undefined if not found or already resolved.
  */
 export function revisePrediction(
   db: Database.Database,
   id: string,
-  updates: { prediction?: string; confidence?: number; reasoning?: string },
+  updates: { prediction?: string; confidence?: number; reasoning?: string; reason?: string },
 ): string | undefined {
   const original = getPrediction(db, id);
   if (!original || original.outcome !== null) return undefined;
 
-  const newId = addPrediction(db, {
-    topic: original.topic,
-    prediction: updates.prediction ?? original.prediction,
-    confidence: updates.confidence ?? original.confidence,
-    reasoning: updates.reasoning ?? original.reasoning ?? undefined,
-    resolution_criteria: original.resolution_criteria ?? undefined,
-    check_date: original.check_date ?? undefined,
-    domain: original.domain,
-    supersedes: original.id,
-  });
+  const revision: PredictionRevision = {
+    previous_prediction: original.prediction,
+    previous_confidence: original.confidence,
+    previous_reasoning: original.reasoning,
+    reason: updates.reason ?? 'Revised',
+    revised_at: new Date().toISOString(),
+  };
 
-  // Void the original so it doesn't count toward calibration
-  resolvePrediction(db, original.id, 'voided', 'Superseded by revised prediction');
+  const newHistory = [...original.revision_history, revision];
 
-  return newId;
+  db.prepare(`
+    UPDATE predictions
+    SET prediction = ?,
+        confidence = ?,
+        reasoning = ?,
+        revision_history = ?
+    WHERE id = ?
+  `).run(
+    updates.prediction ?? original.prediction,
+    updates.confidence ?? original.confidence,
+    updates.reasoning ?? original.reasoning,
+    JSON.stringify(newHistory),
+    original.id,
+  );
+
+  return original.id;
 }
 
 export function resolvePrediction(
@@ -182,13 +238,14 @@ export function resolvePrediction(
 }
 
 export function getPendingReview(db: Database.Database): Prediction[] {
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT * FROM predictions
     WHERE outcome IS NULL
       AND check_date IS NOT NULL
       AND check_date <= datetime('now')
     ORDER BY check_date ASC
-  `).all() as Prediction[];
+  `).all() as PredictionRow[];
+  return rows.map(rowToPrediction);
 }
 
 export function getCalibration(db: Database.Database, opts?: CalibrationOpts): CalibrationResult {
@@ -200,7 +257,7 @@ export function getCalibration(db: Database.Database, opts?: CalibrationOpts): C
     params.push(opts.domain);
   }
 
-  const resolved = db.prepare(sql).all(...params) as Prediction[];
+  const resolved = (db.prepare(sql).all(...params) as PredictionRow[]).map(rowToPrediction);
 
   const allDomains: Domain[] = ['political', 'technical', 'behavioral', 'market', 'general'];
   const by_domain: Record<Domain, DomainCalibration> = {} as Record<Domain, DomainCalibration>;
