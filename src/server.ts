@@ -907,11 +907,12 @@ tool(
       content: params.content,
       metadata: params.metadata as Record<string, unknown>,
     });
-    const k = getKnowledge(db, id);
+    const k = id ? getKnowledge(db, id) : null;
+    const preview = k?.content?.slice(0, 200) ?? '';
     return {
       content: [{
         type: 'text' as const,
-        text: `Knowledge upserted: ${id.slice(0, 8)} (${k?.type}/${k?.key})\nMutable: ${k?.mutable}\nContent: ${k?.content.slice(0, 200)}${(k?.content.length ?? 0) > 200 ? '...' : ''}`,
+        text: `Knowledge upserted: ${id?.slice(0, 8) ?? 'unknown'} (${k?.type}/${k?.key})\nMutable: ${k?.mutable}\nContent: ${preview}${(k?.content?.length ?? 0) > 200 ? '...' : ''}`,
       }],
     };
   },
@@ -930,7 +931,7 @@ tool(
     return {
       content: [{
         type: 'text' as const,
-        text: `[${k.type}/${k.key}] (${k.mutable ? 'mutable' : 'immutable'})\nUpdated: ${k.updated_at}\nMetadata: ${JSON.stringify(k.metadata).slice(0, 200)}\n\n${k.content}`,
+        text: `[${k.type}/${k.key}] (${k.mutable ? 'mutable' : 'immutable'})\nUpdated: ${k.updated_at}\nMetadata: ${JSON.stringify(k.metadata ?? {}).slice(0, 200)}\n\n${k.content ?? ''}`,
       }],
     };
   },
@@ -973,7 +974,7 @@ tool(
     });
     if (items.length === 0) return { content: [{ type: 'text' as const, text: 'No knowledge entries found.' }] };
     const lines = items.map(k =>
-      `[${k.id.slice(0, 8)}] ${k.type}${k.key ? `/${k.key}` : ''} (${k.mutable ? 'mutable' : 'immutable'}) — ${k.content.slice(0, 80)}${k.content.length > 80 ? '...' : ''}`
+      `[${k.id?.slice(0, 8) ?? '?'}] ${k.type}${k.key ? `/${k.key}` : ''} (${k.mutable ? 'mutable' : 'immutable'}) — ${k.content?.slice(0, 80) ?? '(empty)'}${(k.content?.length ?? 0) > 80 ? '...' : ''}`
     );
     return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
   },
