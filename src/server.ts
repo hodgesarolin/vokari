@@ -20,7 +20,7 @@ import {
 } from './beliefs.js';
 import {
   addPrediction, getPrediction, listPredictions,
-  resolvePrediction, getPendingReview, getCalibration,
+  revisePrediction, resolvePrediction, getPendingReview, getCalibration,
 } from './predictions.js';
 import {
   addPosition, getPosition, listPositions, challengePosition,
@@ -425,6 +425,26 @@ tool(
 );
 
 tool(
+  'revise_prediction',
+  'Revise an unresolved prediction — update text, confidence, or reasoning. Creates a new prediction that supersedes the original (which is voided for calibration integrity).',
+  {
+    id: z.string().describe('Prediction ID to revise'),
+    prediction: z.string().optional().describe('Updated prediction text'),
+    confidence: z.number().optional().describe('Updated confidence (0-1)'),
+    reasoning: z.string().optional().describe('Updated reasoning'),
+  },
+  async (params) => {
+    const newId = revisePrediction(db, params.id, {
+      prediction: params.prediction,
+      confidence: params.confidence,
+      reasoning: params.reasoning,
+    });
+    if (!newId) return { content: [{ type: 'text' as const, text: `Prediction not found or already resolved: ${params.id}` }] };
+    return { content: [{ type: 'text' as const, text: `Prediction revised. New ID: ${newId.slice(0, 8)} (supersedes ${params.id.slice(0, 8)})` }] };
+  },
+);
+
+tool(
   'resolve_prediction',
   'Resolve a prediction as correct, incorrect, partial, or voided',
   {
@@ -703,8 +723,7 @@ server.resource(
 
 const KNOWLEDGE_TYPES = [
   'belief', 'correction', 'position', 'prediction', 'research',
-  'handoff', 'context', 'archive', 'daily', 'transcript',
-  'session', 'ticket', 'digest',
+  'handoff', 'context', 'archive', 'digest',
 ] as const;
 
 tool(

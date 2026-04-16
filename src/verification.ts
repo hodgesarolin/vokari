@@ -360,34 +360,39 @@ export function recordVerification(
 
   const now = new Date().toISOString();
 
-  db.prepare(`
-    UPDATE verifications
-    SET status = 'completed',
-        outcome = ?,
-        evidence = ?,
-        notes = ?,
-        completed_at = ?
-    WHERE id = ?
-  `).run(
-    outcome,
-    JSON.stringify(evidence ?? []),
-    notes ?? null,
-    now,
-    verification.id,
-  );
-
-  // If confirmed, also confirm the belief (updates last_confirmed)
-  if (outcome === 'confirmed') {
-    const evidenceStr = evidence && evidence.length > 0
-      ? `Verified via adversarial review: ${evidence[0]}`
-      : 'Verified via adversarial review';
+  // Wrap both updates in a transaction so verification + belief stay consistent
+  const txn = db.transaction(() => {
     db.prepare(`
-      UPDATE beliefs
-      SET last_confirmed = ?,
-          evidence = json_insert(evidence, '$[#]', ?)
+      UPDATE verifications
+      SET status = 'completed',
+          outcome = ?,
+          evidence = ?,
+          notes = ?,
+          completed_at = ?
       WHERE id = ?
-    `).run(now, evidenceStr, verification.belief_id);
-  }
+    `).run(
+      outcome,
+      JSON.stringify(evidence ?? []),
+      notes ?? null,
+      now,
+      verification.id,
+    );
+
+    // If confirmed, also confirm the belief (updates last_confirmed)
+    if (outcome === 'confirmed') {
+      const evidenceStr = evidence && evidence.length > 0
+        ? `Verified via adversarial review: ${evidence[0]}`
+        : 'Verified via adversarial review';
+      db.prepare(`
+        UPDATE beliefs
+        SET last_confirmed = ?,
+            evidence = json_insert(evidence, '$[#]', ?)
+        WHERE id = ?
+      `).run(now, evidenceStr, verification.belief_id);
+    }
+  });
+
+  txn();
 
   return getVerification(db, verification.id);
 }

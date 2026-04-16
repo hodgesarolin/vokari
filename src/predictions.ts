@@ -35,6 +35,7 @@ export interface AddPredictionInput {
 export interface ListPredictionsOpts {
   domain?: Domain;
   resolved?: boolean;
+  limit?: number;
 }
 
 export interface CalibrationOpts {
@@ -124,7 +125,43 @@ export function listPredictions(db: Database.Database, opts?: ListPredictionsOpt
   }
 
   sql += ' ORDER BY created_at DESC';
+  const limit = opts?.limit ?? 100;
+  sql += ' LIMIT ?';
+  params.push(limit);
   return db.prepare(sql).all(...params) as Prediction[];
+}
+
+/**
+ * Revise an unresolved prediction — update the prediction text, confidence,
+ * or reasoning before resolution. Creates a new prediction that supersedes
+ * the original so the original is preserved for calibration history.
+ *
+ * Returns the new prediction ID, or undefined if the original wasn't found
+ * or was already resolved.
+ */
+export function revisePrediction(
+  db: Database.Database,
+  id: string,
+  updates: { prediction?: string; confidence?: number; reasoning?: string },
+): string | undefined {
+  const original = getPrediction(db, id);
+  if (!original || original.outcome !== null) return undefined;
+
+  const newId = addPrediction(db, {
+    topic: original.topic,
+    prediction: updates.prediction ?? original.prediction,
+    confidence: updates.confidence ?? original.confidence,
+    reasoning: updates.reasoning ?? original.reasoning ?? undefined,
+    resolution_criteria: original.resolution_criteria ?? undefined,
+    check_date: original.check_date ?? undefined,
+    domain: original.domain,
+    supersedes: original.id,
+  });
+
+  // Void the original so it doesn't count toward calibration
+  resolvePrediction(db, original.id, 'voided', 'Superseded by revised prediction');
+
+  return newId;
 }
 
 export function resolvePrediction(

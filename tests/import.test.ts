@@ -6,7 +6,6 @@ import {
   getKnowledgeByKey,
   getKnowledgeStats,
   importAllToKnowledge,
-  importChunksToKnowledge,
   searchKnowledge,
 } from '../src/knowledge.js';
 import { initDb } from '../src/db.js';
@@ -134,78 +133,6 @@ describe('Import to Knowledge Store', () => {
 
       const stats = getKnowledgeStats(db);
       expect(stats.total).toBe(4);
-    });
-  });
-
-  describe('importChunksToKnowledge — from legacy chunks table', () => {
-    beforeEach(() => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS chunks (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          source_type TEXT NOT NULL,
-          source_file TEXT NOT NULL,
-          chunk_index INTEGER NOT NULL,
-          content TEXT NOT NULL,
-          metadata TEXT,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-      `);
-    });
-
-    it('imports chunks as knowledge rows', () => {
-      db.prepare(`
-        INSERT INTO chunks (source_type, source_file, chunk_index, content, metadata)
-        VALUES (?, ?, ?, ?, ?)
-      `).run('research', 'tmj-guide.md', 0, 'TMJ management techniques...', '{"section":"overview"}');
-
-      db.prepare(`
-        INSERT INTO chunks (source_type, source_file, chunk_index, content, metadata)
-        VALUES (?, ?, ?, ?, ?)
-      `).run('research', 'tmj-guide.md', 1, 'Pillow recommendations...', null);
-
-      const count = importChunksToKnowledge(db);
-      expect(count).toBe(2);
-    });
-
-    it('preserves source metadata', () => {
-      db.prepare(`
-        INSERT INTO chunks (source_type, source_file, chunk_index, content, metadata)
-        VALUES (?, ?, ?, ?, ?)
-      `).run('context', 'family.md', 0, 'Family information with Kim and the kids...', '{"priority":"high"}');
-
-      importChunksToKnowledge(db);
-
-      // Search should find it
-      const results = searchKnowledge(db, 'family');
-      expect(results.length).toBeGreaterThan(0);
-      expect(results[0].metadata.source_file).toBe('family.md');
-      expect(results[0].metadata.chunk_index).toBe(0);
-    });
-
-    it('is idempotent', () => {
-      db.prepare(`
-        INSERT INTO chunks (source_type, source_file, chunk_index, content, metadata)
-        VALUES (?, ?, ?, ?, ?)
-      `).run('daily', 'log-2026-02-20.md', 0, 'Daily log content...', null);
-
-      const count1 = importChunksToKnowledge(db);
-      expect(count1).toBe(1);
-
-      const count2 = importChunksToKnowledge(db);
-      expect(count2).toBe(0);
-    });
-
-    it('maps source types to knowledge types', () => {
-      db.prepare(`
-        INSERT INTO chunks (source_type, source_file, chunk_index, content, metadata)
-        VALUES (?, ?, ?, ?, NULL)
-      `).run('transcript', 'session-2026-02-20.md', 0, 'Transcript of conversation...');
-
-      importChunksToKnowledge(db);
-
-      const stats = getKnowledgeStats(db);
-      expect(countByType(stats, 'transcript')).toBe(1);
     });
   });
 

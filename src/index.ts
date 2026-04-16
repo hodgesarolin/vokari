@@ -55,6 +55,7 @@ export {
   addPrediction,
   getPrediction,
   listPredictions,
+  revisePrediction,
   resolvePrediction,
   getPendingReview,
   getCalibration,
@@ -65,6 +66,7 @@ export type {
   Domain,
   Outcome,
   AddPredictionInput,
+  ListPredictionsOpts,
   CalibrationResult,
 } from './predictions.js';
 

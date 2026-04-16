@@ -91,6 +91,7 @@ export interface ListBeliefsOpts {
   status?: BeliefStatus;
   tags?: string[];
   challengedOnly?: boolean;
+  limit?: number;
 }
 
 export interface ObservationMatch {
@@ -146,14 +147,23 @@ const MIGRATIONS = [
 
 // ── Helpers ──
 
+/** Safe JSON parse — returns fallback on malformed data instead of crashing. */
+function safeJsonParse<T>(json: string, fallback: T): T {
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 /** Parse a SQLite row's JSON fields into a typed Belief object. */
 function rowToBelief(row: BeliefRow): Belief {
   return {
     ...row,
-    evidence: JSON.parse(row.evidence) as string[],
-    tags: JSON.parse(row.tags) as string[],
-    contradictions: JSON.parse(row.contradictions) as Contradiction[],
-    revision_history: JSON.parse(row.revision_history) as RevisionEntry[],
+    evidence: safeJsonParse<string[]>(row.evidence, []),
+    tags: safeJsonParse<string[]>(row.tags, []),
+    contradictions: safeJsonParse<Contradiction[]>(row.contradictions, []),
+    revision_history: safeJsonParse<RevisionEntry[]>(row.revision_history, []),
   };
 }
 
@@ -247,6 +257,9 @@ export function listBeliefs(db: Database.Database, opts?: ListBeliefsOpts): Beli
   }
 
   sql += ' ORDER BY first_recorded DESC';
+  const limit = opts?.limit ?? 100;
+  sql += ' LIMIT ?';
+  params.push(limit);
   const rows = db.prepare(sql).all(...params) as BeliefRow[];
   return rows.map(rowToBelief);
 }
