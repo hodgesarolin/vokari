@@ -1,7 +1,7 @@
 {
   "name": "@vokari/epistemic",
-  "version": "0.3.0",
-  "description": "Epistemic engine for AI assistants — beliefs, predictions, corrections, calibration, awareness, and context injection via MCP",
+  "version": "0.4.0",
+  "description": "Epistemic integrity engine for AI assistants — beliefs, predictions, corrections, adversarial verification, calibration dashboard, and context injection via MCP",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,12 +11,14 @@
     "LICENSE"
   ],
   "bin": {
+    "vokari": "dist/cli.js",
     "epistemic": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
+    "dashboard": "tsx src/dashboard.ts",
     "test": "vitest run",
     "import": "tsx src/cli.ts"
   },
@@ -31,7 +33,8 @@
     "predictions",
     "corrections",
     "calibration",
-    "metacognition",
+    "verification",
+    "dashboard",
     "epistemology",
     "self-verification"
   ],

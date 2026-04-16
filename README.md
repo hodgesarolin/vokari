@@ -1,40 +1,23 @@
-# @vokari/epistemic
+# Vokari
 
-An epistemic engine for AI assistants. Track what your AI believes, predict outcomes, catch mistakes, and build calibrated confidence — all via MCP.
+Epistemic integrity engine for AI agents. Track what your agent believes, verify it's correct, measure calibration over time.
 
-> Mem0 remembers what you said. Vokari tracks what it *believes* — and knows when it's wrong.
+> Memory systems remember. Vokari verifies.
 
-## The Problem
-
-LLMs forget everything between sessions. Current solutions (Mem0, server-memory) add persistence — but persistence without self-correction just means your AI remembers its mistakes forever.
-
-What's actually missing:
-- **No self-correction.** When a user says "that's wrong," the correction needs to persist, get injected into every future session, and eventually retire when the root cause is fixed.
-- **No uncertainty tracking.** Your AI should know what it's confident about and what it's guessing at — and get better at knowing the difference over time.
-- **No calibration.** If your AI says "I'm 80% sure," it should actually be right ~80% of the time. Without tracking, you can't tell.
-
-## What This Does
-
-Vokari gives AI assistants an epistemic layer — beliefs, predictions, corrections, positions, and calibration — stored in SQLite, served via MCP, with built-in adversarial self-verification.
-
-**45 tools. 607 tests. Zero external dependencies beyond SQLite.**
-
-Dogfooded for 500+ hours as [Brain](https://github.com/hodgesarolin/brain), a personal AI assistant running on Claude Opus.
-
-## Quick Start
-
-### As an MCP Server (Claude Desktop, Cursor, etc.)
+## 30-Second Quickstart
 
 ```bash
-npx @vokari/epistemic
+npx vokari init
+npx vokari serve --dashboard
+# Open http://localhost:3838
 ```
 
-Add to your MCP client config:
+Add to your MCP client config (Claude Code, Cursor, etc.):
 
 ```json
 {
   "mcpServers": {
-    "epistemic": {
+    "vokari": {
       "command": "npx",
       "args": ["@vokari/epistemic"],
       "env": {
@@ -45,10 +28,32 @@ Add to your MCP client config:
 }
 ```
 
-### As a Library
+## Why Vokari
+
+The agent memory space is crowded — Mem0, Zep, Letta, YantrikDB all solve memory retrieval. None of them solve epistemic integrity: is what the agent believes actually *correct*, and is it getting more accurate over time?
+
+Vokari tracks predictions with Brier score calibration, adversarially self-verifies beliefs on a scheduled tick, models epistemic positions with revision history, and provides calibration dashboards showing where an agent is systematically overconfident. No other tool does this.
+
+**Mem0 remembers what users said. Vokari tracks whether the agent's knowledge is right.**
+
+## Core Concepts
+
+**Beliefs** — Factual claims the agent holds about users, systems, the world, or itself. Each tracks confidence (0-1), evidence, contradictions, and revision history. Automatic contradiction detection via word overlap, negation, and numeric sensitivity thresholds.
+
+**Predictions** — Explicit forecasts with confidence levels, check dates, and resolution criteria. Resolved as correct/incorrect/partial. Brier scores and calibration curves reveal whether "80% confident" actually means 80%.
+
+**Positions** — Epistemic stances on topics with reasoning, evidence, and counterevidence. Challenge stale positions. Track how thinking evolves through revision history.
+
+**Corrections** — Behavioral error tracking with streaks, graduation, and violation detection. The most battle-tested module — 35 active corrections driving real behavioral change in production.
+
+**Verification** — Adversarial self-verification with tick-based scheduling. Priority: never-verified > challenged > stale > high-confidence. Opportunistic verification piggybacks on tool responses — no cron needed.
+
+**Calibration** — Brier score by domain, systematic bias detection (overconfident vs underconfident), domain coverage gaps, actionable recommendations.
+
+## Integration Example
 
 ```typescript
-import { initDb, addBelief, predict, calibration } from '@vokari/epistemic';
+import { initDb, addBelief, addPrediction, getCalibration } from '@vokari/epistemic';
 
 const db = initDb('./epistemic.db');
 
@@ -61,204 +66,118 @@ addBelief(db, {
 });
 
 // Make a prediction
-predict(db, {
+addPrediction(db, {
   topic: "project-deadline",
   prediction: "Sprint will ship by Friday",
   confidence: 0.7,
-  resolution_criteria: "All PRs merged by EOD Friday"
+  resolution_criteria: "All PRs merged by EOD Friday",
+  check_date: "2026-04-18"
 });
 
 // Check calibration
-const cal = calibration(db);
-// → { accuracy: 0.83, brier: 0.15, predictions: 29, ... }
+const cal = getCalibration(db);
+// { accuracy: 0.83, brier_score: 0.15, total: 29, ... }
 ```
 
-## Tools by Layer
+## MCP Tools Reference (35 tools)
 
-Vokari organizes 45 tools into progressive layers. Start with what you need; add depth as you go.
-
-### Layer 1: Corrections — "What did I get wrong?"
-
-Store mistakes with DPO-ready training pairs. Inject active corrections into every system prompt.
-
-| Tool | What it does |
+### Beliefs (8)
+| Tool | Description |
 |------|-------------|
-| `correct` | Store a correction with type, root cause, and good/bad examples |
-| `get_context` | Get formatted corrections for system prompt injection |
-| `list_corrections` | List corrections, optionally filtered by type |
-| `record_violation` | Track when a correction is violated again |
-| `graduate_correction` | Retire a correction that's been fixed |
-| `delete_correction` | Remove permanently |
-| `correction_stats` | Overview statistics |
+| `add_belief` | Record a belief with confidence, category, source, evidence |
+| `list_beliefs` | List beliefs filtered by category/status/tags |
+| `check_observation` | Check observation against existing beliefs for contradictions |
+| `contradict_belief` | Record a contradiction against a belief |
+| `confirm_belief` | Confirm a belief with optional evidence |
+| `revise_belief` | Revise a belief statement |
+| `belief_context` | Get formatted beliefs for system prompt injection |
+| `belief_stats` | Get belief store statistics |
 
-```text
-You: "correct" → type: "fact", content: "User's school is PS 28, NOT PS 27"
-AI gets it right next time. And every time after.
-```
-
-### Layer 2: Beliefs — "What do I think is true?"
-
-Record beliefs about the user, system, world, or itself. Check new observations against existing beliefs. Detect contradictions automatically.
-
-| Tool | What it does |
+### Predictions (5)
+| Tool | Description |
 |------|-------------|
-| `add_belief` | Record a belief (user/system/world/self) |
-| `list_beliefs` | Browse and filter beliefs |
-| `check_observation` | Check new info against existing beliefs |
-| `contradict_belief` | Record a contradiction |
-| `confirm_belief` | Confirm with new evidence |
-| `revise_belief` | Update a belief |
-| `belief_context` | Format beliefs for system prompt |
-| `belief_stats` | Statistics |
-
-### Layer 3: Predictions — "What will happen?"
-
-Make predictions with explicit confidence levels, resolution criteria, and check dates. Track outcomes. Get Brier-scored calibration reports.
-
-| Tool | What it does |
-|------|-------------|
-| `predict` | Make a prediction with confidence + check date |
-| `resolve_prediction` | Mark correct/incorrect/partial/voided |
+| `predict` | Make a prediction with confidence and check date |
+| `revise_prediction` | Update prediction in-place with revision history |
+| `resolve_prediction` | Resolve as correct/incorrect/partial/voided |
 | `pending_predictions` | Get predictions due for review |
-| `calibration` | Full report: accuracy, Brier score, bias analysis |
+| `calibration` | Full calibration report with Brier scores and bias analysis |
 
-```text
-You: "predict" → "PR will merge by Thursday" (70% confidence)
-Thursday: "resolve_prediction" → correct
-After 20+ predictions: "calibration" → Brier: 0.15, accuracy: 83%
-→ Your AI learns whether its 70% actually means 70%.
-```
-
-### Layer 4: Positions — "What do I think about that?"
-
-Record opinions with reasoning and confidence. Challenge stale positions. Track how thinking evolves.
-
-| Tool | What it does |
+### Positions (5)
+| Tool | Description |
 |------|-------------|
-| `add_position` | Record a position with reasoning |
-| `challenge_position` | Increment challenge count |
-| `revise_position` | Update with new stance + confidence |
-| `position_context` | Format positions for system prompt |
-| `unchallenged_positions` | Find stale positions (N days without challenge) |
+| `add_position` | Record an epistemic position on a topic |
+| `challenge_position` | Challenge a position with counterevidence |
+| `revise_position` | Revise position stance |
+| `position_context` | Get formatted positions for system prompt |
+| `unchallenged_positions` | Find stale positions not reviewed in N days |
 
-### Layer 5: Self-Verification — "Am I still right?"
-
-Adversarial review system. Automatically queues beliefs for challenge based on staleness, contradictions, or high confidence. Records review outcomes.
-
-| Tool | What it does |
+### Corrections (6)
+| Tool | Description |
 |------|-------------|
-| `verification_tick` | Get beliefs due for adversarial review |
+| `correct` | Record a behavioral correction with category |
+| `list_corrections` | List corrections filtered by type/status |
+| `search_corrections` | Search corrections by keyword |
+| `record_violation` | Track when a correction is violated (resets streak) |
+| `graduate_correction` | Retire a correction after sustained compliance |
+| `correction_stats` | Correction statistics by category |
+
+### Verification (5)
+| Tool | Description |
+|------|-------------|
+| `verification_tick` | Get beliefs due for adversarial review (priority-scheduled) |
 | `create_verification` | Manually queue a belief for review |
-| `record_verification` | Record review results |
-| `skip_verification` | Skip reviews that can't be completed |
-| `verification_status` | Coverage and outcome statistics |
+| `record_verification` | Record result of adversarial review |
+| `skip_verification` | Skip a verification with reason |
+| `verification_status` | Verification coverage and timing stats |
 
-### Layer 6: Events & Awareness — "What's happening around me?"
-
-Session event tracking and cross-session awareness.
-
-| Tool | What it does |
+### Context & Digest (2)
+| Tool | Description |
 |------|-------------|
-| `log_event` | Log to session event stream |
-| `awareness` | Get active sessions, recent completions |
-| `event_stats` | Event stream statistics |
+| `assemble_context` | Budget-aware epistemic context for system prompt |
+| `compile_digest` | Epistemic changelog since a given date |
 
-### Layer 7: Analysis — "Am I thinking clearly?"
-
-Detect cognitive anti-patterns: repetitive loops, attention drift, noisy inputs.
-
-| Tool | What it does |
+### Knowledge Store (4)
+| Tool | Description |
 |------|-------------|
-| `analyze_conversation` | Extract beliefs, topics, corrections from messages |
-| `check_cycling` | Detect repetitive thinking patterns |
-| `check_attention` | Analyze attention budget vs. priority categories |
-| `distill` | Extract signal from noise in log content |
-
-### Layer 8: Knowledge Store — "Where does it all go?"
-
-Unified storage with 12 content types, FTS5 full-text search, and a context compiler that builds prompt-ready context within a token budget.
-
-| Tool | What it does |
-|------|-------------|
-| `upsert_knowledge` | Add/update entries (12 types: belief, correction, research, handoff, etc.) |
-| `get_knowledge` | Retrieve by type + key |
-| `search_knowledge` | Full-text search (BM25 ranking) |
-| `list_knowledge` | Browse entries |
-| `assemble_context` | **Compile a context window** — 3-layer architecture (mandatory → session → relevance) within a character budget |
+| `upsert_knowledge` | Add or update a knowledge entry |
+| `get_knowledge` | Retrieve by type and key |
+| `search_knowledge` | FTS5 search across all knowledge |
 | `knowledge_stats` | Store statistics |
-| `import_to_knowledge` | Import from legacy stores |
-| `upsert_handoff` | Write session handoff documents |
-| `get_handoff` | Read session handoffs |
 
-## How It Compares
+## Comparison
 
-| Feature | Vokari | Hindsight | Mem0 | server-memory |
-|---------|--------|-----------|------|---------------|
-| Memory storage | ✅ | ✅ (4 networks) | ✅ | ✅ |
-| Full-text search | ✅ FTS5 | ✅ (multi-strategy) | ✅ | ✅ |
-| Opinions/beliefs w/ confidence | ✅ | ✅ | ❌ | ❌ |
-| Predictions + calibration | ✅ | ❌ | ❌ | ❌ |
-| Self-correction persistence | ✅ | ❌ | ❌ | ❌ |
-| Adversarial self-verification | ✅ | ❌ | ❌ | ❌ |
-| Brier score calibration | ✅ | ❌ | ❌ | ❌ |
-| Position tracking + challenge | ✅ | ❌ | ❌ | ❌ |
-| Context compilation (budget-aware) | ✅ | ❌ | ❌ | ❌ |
-| Disposition parameters | ❌ (v0.3) | ✅ | ❌ | ❌ |
-| Entity graph retrieval | ❌ | ✅ | ❌ | ❌ |
-| Standard benchmark results | ❌ | ✅ (91.4% LongMemEval) | ❌ | ❌ |
-| External dependencies | SQLite only | PostgreSQL + Docker | Redis/cloud | SQLite |
-| Tools/API surface | 45 MCP tools | REST API | ~6 tools | ~5 tools |
-| Tests | 607 | — | — | — |
+| Feature | Vokari | Mem0 | Zep/Graphiti | YantrikDB |
+|---------|--------|------|--------------|-----------|
+| Memory storage | SQLite | Cloud/Redis | PostgreSQL | MongoDB |
+| Full-text search | FTS5 | Embedding | Embedding | Embedding |
+| Beliefs with confidence | **Yes** | No | No | No |
+| Predictions + calibration | **Yes** | No | No | No |
+| Self-correction tracking | **Yes** | No | No | No |
+| Adversarial verification | **Yes** | No | No | No |
+| Brier score calibration | **Yes** | No | No | No |
+| Position tracking | **Yes** | No | No | No |
+| Calibration dashboard | **Yes** | No | No | No |
+| Vector/embedding search | No | Yes | Yes | Yes |
+| Entity graph | No | No | Yes | No |
+| External dependencies | SQLite only | Cloud | PostgreSQL | MongoDB |
 
-## Architecture
+Vokari complements these tools — use Mem0 or Zep for memory retrieval, Vokari for epistemic integrity.
 
-```text
-┌──────────────────────────────────────────┐
-│              MCP Client                   │
-│  (Claude Desktop, Cursor, custom agent)   │
-└──────────────┬───────────────────────────┘
-               │ MCP protocol
-┌──────────────▼───────────────────────────┐
-│         @vokari/epistemic                 │
-│                                           │
-│  ┌─────────┐ ┌──────────┐ ┌───────────┐ │
-│  │Beliefs  │ │Predictions│ │Corrections│ │
-│  └────┬────┘ └─────┬─────┘ └─────┬─────┘ │
-│       │             │             │       │
-│  ┌────▼─────────────▼─────────────▼────┐ │
-│  │        Unified Knowledge Store       │ │
-│  │    (SQLite + FTS5, 12 content types) │ │
-│  └──────────────┬──────────────────────┘ │
-│                 │                         │
-│  ┌──────────────▼──────────────────────┐ │
-│  │        Context Compiler              │ │
-│  │  mandatory → session → relevance     │ │
-│  │  (budget-aware, session-type-aware)  │ │
-│  └─────────────────────────────────────┘ │
-└──────────────────────────────────────────┘
+## CLI
+
+```bash
+vokari init [--db ./epistemic.db]           # Initialize database
+vokari serve [--dashboard] [--port 3838]    # Start MCP server (+ dashboard)
+vokari dashboard [--port 3838]              # Dashboard only
+vokari stats [--db ./epistemic.db]          # Print statistics
+vokari context [--budget 5000]              # Print formatted context
+vokari calibration                          # Print calibration report
+vokari beliefs                              # Print belief statistics
+vokari predictions                          # List pending predictions
+vokari verify                               # Print verification status
+vokari export [--out backup.json]           # Export all data as JSON
+vokari import <file>                        # Import corrections.md or JSON backup
 ```
-
-## Correction Types
-
-| Type | Graduates? | Example |
-|------|-----------|---------|
-| `policy` | Never | "Don't discuss work topics" |
-| `fact` | When verified | "Income is $105/hr, not $96" |
-| `pattern` | After 90 days + 0 recurrences | "Verify dates before stating them" |
-| `technical` | When root cause fixed | "Use file append, not overwrite" |
-
-Every correction with `example_bad` and `example_good` is a DPO training pair — export them for fine-tuning.
-
-## Real-World Usage
-
-Brain, a personal AI assistant, has used @vokari/epistemic for 500+ hours:
-- 35 corrections (7 policy, 16 fact, 8 pattern, 4 technical)
-- 25 active predictions tracked, 82.8% accuracy (Brier: 0.156)
-- 30 positions with active challenge/revision cycles
-- 224 knowledge entries with FTS5 search
-- Adversarial verification running on a schedule
-
-The epistemic layer catches errors that would otherwise persist forever: wrong facts, behavioral patterns, stale predictions. It's the difference between an AI that remembers and an AI that learns.
 
 ## Environment Variables
 
@@ -270,10 +189,6 @@ The epistemic layer catches errors that would otherwise persist forever: wrong f
 
 - Node.js >= 18
 - better-sqlite3 (compiled native module)
-
-## Contributing
-
-Issues and PRs welcome at [github.com/hodgesarolin/vokari](https://github.com/hodgesarolin/vokari).
 
 ## License
 

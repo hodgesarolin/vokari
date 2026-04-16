@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   initDb,
+  runMigration,
   resolveId,
   addCorrection,
   getCorrection,
   listCorrections,
+  searchCorrections,
   recordViolation,
   graduateCorrection,
   deleteCorrection,
@@ -294,5 +296,103 @@ describe('resolveId', () => {
     const prefix = id.slice(0, 8);
     deleteCorrection(db, prefix);
     expect(getCorrection(db, id)).toBeUndefined();
+  });
+});
+
+describe('searchCorrections', () => {
+  beforeEach(() => {
+    addCorrection(db, { type: 'policy', content: 'Brain is personal only', permanence: 'never' });
+    addCorrection(db, { type: 'fact', content: 'Kim earns $105 per hour', permanence: 'never' });
+    addCorrection(db, { type: 'pattern', content: 'Always verify dates and days of week', permanence: 'graduable' });
+    addCorrection(db, { type: 'technical', content: 'No MCP tools in cron jobs', permanence: 'graduable' });
+  });
+
+  it('finds corrections matching query', () => {
+    const results = searchCorrections(db, 'Kim');
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toContain('Kim');
+  });
+
+  it('returns empty for no matches', () => {
+    const results = searchCorrections(db, 'nonexistent term xyz');
+    expect(results).toHaveLength(0);
+  });
+
+  it('filters by type', () => {
+    const results = searchCorrections(db, 'verify', { type: 'pattern' });
+    expect(results).toHaveLength(1);
+    expect(results[0].type).toBe('pattern');
+  });
+
+  it('respects limit', () => {
+    const results = searchCorrections(db, 'a', { limit: 2 });
+    expect(results.length).toBeLessThanOrEqual(2);
+  });
+
+  it('excludes graduated corrections', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Graduated searchable content', permanence: 'graduable' });
+    graduateCorrection(db, id);
+    const results = searchCorrections(db, 'Graduated searchable');
+    expect(results).toHaveLength(0);
+  });
+
+  it('orders by violation count descending', () => {
+    const high = addCorrection(db, { type: 'fact', content: 'High violation searchable', permanence: 'never' });
+    const low = addCorrection(db, { type: 'fact', content: 'Low violation searchable', permanence: 'never' });
+    recordViolation(db, high);
+    recordViolation(db, high);
+    recordViolation(db, high);
+    recordViolation(db, low);
+
+    const results = searchCorrections(db, 'searchable');
+    expect(results).toHaveLength(2);
+    expect(results[0].violation_count).toBe(3);
+    expect(results[1].violation_count).toBe(1);
+  });
+});
+
+describe('listCorrections with limit', () => {
+  it('defaults to 100 limit', () => {
+    // Add 3 corrections, should all be returned
+    addCorrection(db, { type: 'fact', content: 'F1' });
+    addCorrection(db, { type: 'fact', content: 'F2' });
+    addCorrection(db, { type: 'fact', content: 'F3' });
+    const results = listCorrections(db);
+    expect(results).toHaveLength(3);
+  });
+
+  it('respects explicit limit', () => {
+    addCorrection(db, { type: 'fact', content: 'F1' });
+    addCorrection(db, { type: 'fact', content: 'F2' });
+    addCorrection(db, { type: 'fact', content: 'F3' });
+    const results = listCorrections(db, { limit: 2 });
+    expect(results).toHaveLength(2);
+  });
+});
+
+describe('runMigration', () => {
+  it('runs a migration once', () => {
+    const ran = runMigration(db, 'test_migration', `CREATE TABLE test_mig (id TEXT PRIMARY KEY)`);
+    expect(ran).toBe(true);
+
+    // Table should exist
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='test_mig'").all();
+    expect(tables).toHaveLength(1);
+  });
+
+  it('does not run the same migration twice', () => {
+    runMigration(db, 'test_once', `CREATE TABLE test_once (id TEXT PRIMARY KEY)`);
+    const ran = runMigration(db, 'test_once', `CREATE TABLE test_once_again (id TEXT PRIMARY KEY)`);
+    expect(ran).toBe(false);
+
+    // Second table should NOT exist
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='test_once_again'").all();
+    expect(tables).toHaveLength(0);
+  });
+
+  it('handles duplicate column errors gracefully', () => {
+    // The corrections table already has 'content' column
+    const ran = runMigration(db, 'add_content_again', `ALTER TABLE corrections ADD COLUMN content TEXT`);
+    expect(ran).toBe(false);
   });
 });

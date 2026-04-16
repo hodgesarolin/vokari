@@ -11,14 +11,12 @@ import {
   deleteKnowledge,
   deleteKnowledgeByType,
   searchKnowledge,
-  searchKnowledgeHybrid,
   getKnowledgeStats,
   importBeliefsToKnowledge,
   importCorrectionsToKnowledge,
   importPositionsToKnowledge,
   importPredictionsToKnowledge,
   importAllToKnowledge,
-  importChunksToKnowledge,
   listKnowledgeInternal,
   MetadataFilter,
 } from '../src/knowledge.js';
@@ -28,7 +26,6 @@ import { addBelief, initBeliefs } from '../src/beliefs.js';
 import { addCorrection } from '../src/db.js';
 import { addPosition, initPositions } from '../src/positions.js';
 import { addPrediction, initPredictions } from '../src/predictions.js';
-import { initRag, indexContent } from '../src/rag.js';
 
 let db: Database.Database;
 
@@ -44,13 +41,6 @@ describe('initKnowledge', () => {
   it('creates the knowledge table', () => {
     const tables = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge'"
-    ).all();
-    expect(tables).toHaveLength(1);
-  });
-
-  it('creates the knowledge_access table', () => {
-    const tables = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_access'"
     ).all();
     expect(tables).toHaveLength(1);
   });
@@ -429,38 +419,12 @@ describe('searchKnowledge', () => {
     expect(results.length).toBeGreaterThanOrEqual(0);
   });
 
-  it('records access for returned results', () => {
-    searchKnowledge(db, 'veterinarian');
-    searchKnowledge(db, 'veterinarian');
-
-    const access = db.prepare(
-      'SELECT access_count FROM knowledge_access WHERE knowledge_id = (SELECT id FROM knowledge WHERE content LIKE ?)'
-    ).get('%veterinarian%') as { access_count: number } | undefined;
-    expect(access).toBeDefined();
-    expect(access!.access_count).toBe(2);
-  });
-
   it('searches across types by default', () => {
     // Use a single term that's present in our test data
     const results = searchKnowledge(db, 'veterinarian');
     expect(results.length).toBeGreaterThan(0);
     // Without type filter, should return from any matching type
     expect(results[0].type).toBe('belief');
-  });
-});
-
-// ── Hybrid Search ──
-
-describe('searchKnowledgeHybrid', () => {
-  it('falls back to FTS when no vec table exists', async () => {
-    addKnowledge(db, { type: 'belief', content: 'Test hybrid search content' });
-
-    const mockEmbed = async (_: string) => new Float32Array(384);
-    const results = await searchKnowledgeHybrid(db, 'hybrid search', {
-      embedFn: mockEmbed,
-    });
-    expect(results.length).toBeGreaterThan(0);
-    expect(results[0].rrf_score).toBe(0); // No vec contribution
   });
 });
 
@@ -719,47 +683,6 @@ describe('importAllToKnowledge', () => {
     expect(searchKnowledge(db, 'correction').length).toBeGreaterThan(0);
     expect(searchKnowledge(db, 'position').length).toBeGreaterThan(0);
     expect(searchKnowledge(db, 'prediction').length).toBeGreaterThan(0);
-  });
-});
-
-// ── Migration: Chunks ──
-
-describe('importChunksToKnowledge', () => {
-  it('returns 0 when chunks table does not exist', () => {
-    const count = importChunksToKnowledge(db);
-    expect(count).toBe(0);
-  });
-
-  it('imports chunks from RAG table', () => {
-    // Create chunks table via initRag
-    initRag(db);
-
-    // Add some chunks
-    indexContent(db, 'research', 'scotus-analysis.md', 'SCOTUS ruled on tariffs. The decision was 6-3.', 'paragraphs');
-    indexContent(db, 'context', 'family.md', 'Daniel has 3 kids. Kim is a veterinarian.', 'paragraphs');
-
-    const count = importChunksToKnowledge(db);
-    expect(count).toBe(2);
-  });
-
-  it('preserves chunk metadata', () => {
-    initRag(db);
-    indexContent(db, 'research', 'test.md', 'Test content for import', 'paragraphs');
-
-    importChunksToKnowledge(db);
-    const items = listKnowledge(db, { type: 'research' });
-    expect(items.length).toBe(1);
-    expect(items[0].metadata.source_file).toBe('test.md');
-    expect(items[0].metadata.chunk_index).toBe(0);
-  });
-
-  it('makes imported chunks searchable', () => {
-    initRag(db);
-    indexContent(db, 'research', 'test.md', 'SCOTUS tariff analysis details', 'paragraphs');
-
-    importChunksToKnowledge(db);
-    const results = searchKnowledge(db, 'tariff analysis');
-    expect(results.length).toBeGreaterThan(0);
   });
 });
 

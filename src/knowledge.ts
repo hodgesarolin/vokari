@@ -23,6 +23,10 @@ import { randomUUID } from 'crypto';
 
 // ── Types ──
 
+/**
+ * Built-in knowledge types. Hosts can extend with custom types via
+ * the `string` escape hatch (e.g., 'session', 'ticket', 'daily').
+ */
 export type KnowledgeType =
   | 'belief'
   | 'correction'
@@ -32,11 +36,8 @@ export type KnowledgeType =
   | 'handoff'
   | 'context'
   | 'archive'
-  | 'daily'
-  | 'transcript'
-  | 'session'
-  | 'ticket'
-  | 'digest';
+  | 'digest'
+  | (string & {});  // allow arbitrary host-defined types
 
 // ── Safe SQL Fragments ──
 // Branded types prevent raw SQL injection. Only pre-registered fragments are allowed.
@@ -150,27 +151,11 @@ export interface KnowledgeSearchResult extends Knowledge {
   snippet: string;
 }
 
-export interface HybridKnowledgeSearchResult extends KnowledgeSearchResult {
-  rrf_score: number;
-}
-
-export type EmbedFn = (text: string) => Promise<Float32Array>;
-
-export interface HybridSearchKnowledgeOpts extends SearchKnowledgeOpts {
-  embedFn: EmbedFn;
-}
 
 export interface KnowledgeStats {
   total: number;
   byType: { type: string; count: number }[];
   mutableCount: number;
-}
-
-export interface KnowledgeAccessRow {
-  knowledge_id: string;
-  access_count: number;
-  last_accessed: string | null;
-  relevance_score: number;
 }
 
 // ── Schema ──
@@ -195,13 +180,6 @@ const KNOWLEDGE_SCHEMA = `
 
   CREATE INDEX IF NOT EXISTS idx_knowledge_updated
     ON knowledge(updated_at);
-
-  CREATE TABLE IF NOT EXISTS knowledge_access (
-    knowledge_id TEXT PRIMARY KEY REFERENCES knowledge(id) ON DELETE CASCADE,
-    access_count INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT,
-    relevance_score REAL NOT NULL DEFAULT 1.0
-  );
 `;
 
 /**
@@ -209,7 +187,6 @@ const KNOWLEDGE_SCHEMA = `
  * Safe to call multiple times — uses IF NOT EXISTS.
  */
 export function initKnowledge(db: Database.Database): void {
-  db.pragma('foreign_keys = ON');
   db.exec(KNOWLEDGE_SCHEMA);
 
   // FTS5 virtual table — external content mode.
@@ -385,22 +362,25 @@ export function updateKnowledge(
   id: string,
   updates: { content?: string; metadata?: Record<string, unknown> },
 ): Knowledge | undefined {
-  const existing = getKnowledge(db, id);
-  if (!existing) return undefined;
+  const txn = db.transaction(() => {
+    const existing = getKnowledge(db, id);
+    if (!existing) return undefined;
 
-  const now = new Date().toISOString();
-  const newContent = updates.content ?? existing.content;
-  const newMetadata = updates.metadata
-    ? JSON.stringify(updates.metadata)
-    : JSON.stringify(existing.metadata);
+    const now = new Date().toISOString();
+    const newContent = updates.content ?? existing.content;
+    const newMetadata = updates.metadata
+      ? JSON.stringify(updates.metadata)
+      : JSON.stringify(existing.metadata);
 
-  db.prepare(`
-    UPDATE knowledge
-    SET content = ?, metadata = ?, updated_at = ?
-    WHERE id = ?
-  `).run(newContent, newMetadata, now, id);
+    db.prepare(`
+      UPDATE knowledge
+      SET content = ?, metadata = ?, updated_at = ?
+      WHERE id = ?
+    `).run(newContent, newMetadata, now, id);
 
-  return getKnowledge(db, id);
+    return getKnowledge(db, id);
+  });
+  return txn();
 }
 
 /**
@@ -413,35 +393,38 @@ export function upsertKnowledge(
   db: Database.Database,
   input: UpsertKnowledgeInput,
 ): string {
-  const now = new Date().toISOString();
-  const metadataStr = JSON.stringify(input.metadata ?? {});
+  const txn = db.transaction(() => {
+    const now = new Date().toISOString();
+    const metadataStr = JSON.stringify(input.metadata ?? {});
 
-  // Try to find existing row by type + key
-  const existing = db.prepare(
-    'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ?'
-  ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
+    // Try to find existing row by type + key
+    const existing = db.prepare(
+      'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ?'
+    ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
 
-  if (existing) {
-    // Update existing row
+    if (existing) {
+      // Update existing row
+      db.prepare(`
+        UPDATE knowledge
+        SET content = ?, metadata = ?, updated_at = ?
+        WHERE id = ?
+      `).run(input.content, metadataStr, now, existing.id);
+      return existing.id;
+    }
+
+    // Create new row
+    const id = randomUUID();
+    // Default: handoff and context types are mutable
+    const mutable = input.type === 'handoff' || input.type === 'context' ? 1 : 0;
+
     db.prepare(`
-      UPDATE knowledge
-      SET content = ?, metadata = ?, updated_at = ?
-      WHERE id = ?
-    `).run(input.content, metadataStr, now, existing.id);
-    return existing.id;
-  }
+      INSERT INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, input.type, input.key, input.content, metadataStr, now, now, mutable);
 
-  // Create new row
-  const id = randomUUID();
-  // Default: handoff and context types are mutable
-  const mutable = input.type === 'handoff' || input.type === 'context' ? 1 : 0;
-
-  db.prepare(`
-    INSERT INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, input.type, input.key, input.content, metadataStr, now, now, mutable);
-
-  return id;
+    return id;
+  });
+  return txn();
 }
 
 /**
@@ -521,137 +504,11 @@ export function searchKnowledge(
 
   const rows = db.prepare(sql).all(...params) as (KnowledgeRow & { rank: number; snippet: string })[];
 
-  // Record access for returned results
-  if (rows.length > 0) {
-    const now = new Date().toISOString();
-    const accessStmt = db.prepare(`
-      INSERT INTO knowledge_access (knowledge_id, access_count, last_accessed, relevance_score)
-      VALUES (?, 1, ?, 1.0)
-      ON CONFLICT(knowledge_id) DO UPDATE SET
-        access_count = access_count + 1,
-        last_accessed = ?
-    `);
-    for (const r of rows) {
-      accessStmt.run(r.id, now, now);
-    }
-  }
-
   return rows.map(row => ({
     ...rowToKnowledge(row),
     rank: row.rank,
     snippet: row.snippet,
   }));
-}
-
-// ── Hybrid Search (FTS5 + Vector via RRF) ──
-
-/**
- * Hybrid search combining FTS5 keyword search with vector semantic search.
- * Uses Reciprocal Rank Fusion (RRF) to merge the two ranked lists.
- *
- * Requires sqlite-vec loaded and a knowledge_vec table created.
- * Falls back to FTS5-only if vector search fails.
- */
-export async function searchKnowledgeHybrid(
-  db: Database.Database,
-  queryText: string,
-  opts: HybridSearchKnowledgeOpts,
-): Promise<HybridKnowledgeSearchResult[]> {
-  const { embedFn, limit = 10, ...searchOpts } = opts;
-
-  // Step 1: FTS5 keyword search
-  const ftsResults = searchKnowledge(db, queryText, { ...searchOpts, limit: limit * 2 });
-
-  // Step 2: Vector search
-  let vecResults: { rowid: number; distance: number }[] = [];
-  try {
-    const vecExists = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_vec'"
-    ).get();
-    if (!vecExists) {
-      return ftsResults.map(r => ({ ...r, rrf_score: 0 }));
-    }
-
-    const vecCount = (db.prepare('SELECT COUNT(*) as cnt FROM knowledge_vec').get() as { cnt: number }).cnt;
-    if (vecCount === 0) {
-      return ftsResults.map(r => ({ ...r, rrf_score: 0 }));
-    }
-
-    const queryEmbedding = await embedFn(queryText);
-    vecResults = db.prepare(`
-      SELECT rowid, distance FROM knowledge_vec
-      WHERE embedding MATCH ? AND k = ?
-      ORDER BY distance
-    `).all(Buffer.from(queryEmbedding.buffer), limit * 2) as { rowid: number; distance: number }[];
-  } catch {
-    return ftsResults.map(r => ({ ...r, rrf_score: 0 }));
-  }
-
-  if (vecResults.length === 0) {
-    return ftsResults.map(r => ({ ...r, rrf_score: 0 }));
-  }
-
-  // Step 3: Reciprocal Rank Fusion
-  const K = 60;
-  const scores = new Map<string, { result: KnowledgeSearchResult; ftsRRF: number; vecRRF: number }>();
-
-  // FTS scores by position
-  ftsResults.forEach((r, i) => {
-    scores.set(r.id, { result: r, ftsRRF: 1.0 / (K + i + 1), vecRRF: 0 });
-  });
-
-  // Vec scores — need to hydrate knowledge data
-  // knowledge_vec rowid maps to knowledge rowid (INTEGER autoincrement alias)
-  const vecRowids = vecResults.map(r => r.rowid);
-  if (vecRowids.length > 0) {
-    const placeholders = vecRowids.map(() => '?').join(',');
-    let sql = `
-      SELECT k.id, k.type, k.key, k.content, k.metadata,
-             k.created_at, k.updated_at, k.mutable, k.rowid
-      FROM knowledge k
-      WHERE k.rowid IN (${placeholders})
-    `;
-    const params: unknown[] = [...vecRowids];
-
-    if (searchOpts.type) {
-      sql += ` AND k.type = ?`;
-      params.push(searchOpts.type);
-    }
-    if (searchOpts.types && searchOpts.types.length > 0) {
-      sql += ` AND k.type IN (${searchOpts.types.map(() => '?').join(',')})`;
-      params.push(...searchOpts.types);
-    }
-
-    const chunkMap = new Map<number, Knowledge>();
-    const rows = db.prepare(sql).all(...params) as (KnowledgeRow & { rowid: number })[];
-    for (const row of rows) {
-      chunkMap.set(row.rowid, rowToKnowledge(row));
-    }
-
-    vecResults.forEach((vr, i) => {
-      const knowledge = chunkMap.get(vr.rowid);
-      if (!knowledge) return;
-      const rrf = 1.0 / (K + i + 1);
-      if (scores.has(knowledge.id)) {
-        scores.get(knowledge.id)!.vecRRF = rrf;
-      } else {
-        scores.set(knowledge.id, {
-          result: { ...knowledge, rank: 0, snippet: knowledge.content.slice(0, 200) },
-          ftsRRF: 0,
-          vecRRF: rrf,
-        });
-      }
-    });
-  }
-
-  // Combine and sort by total RRF score
-  return [...scores.values()]
-    .map(s => ({
-      ...s.result,
-      rrf_score: Math.round((s.ftsRRF + s.vecRRF) * 10000) / 10000,
-    }))
-    .sort((a, b) => b.rrf_score - a.rrf_score)
-    .slice(0, limit);
 }
 
 // ── Statistics ──
@@ -949,75 +806,3 @@ export function importAllToKnowledge(db: Database.Database): {
   };
 }
 
-/**
- * Import RAG chunks into the knowledge table.
- * Maps source_type to knowledge type, preserving chunk metadata.
- */
-export function importChunksToKnowledge(db: Database.Database): number {
-  // Check if chunks table exists
-  const chunksExist = db.prepare(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
-  ).get();
-  if (!chunksExist) return 0;
-
-  const chunks = db.prepare(`
-    SELECT id, source_type, source_file, chunk_index, content, metadata, created_at, updated_at
-    FROM chunks
-  `).all() as Array<{
-    id: number;
-    source_type: string;
-    source_file: string;
-    chunk_index: number;
-    content: string;
-    metadata: string | null;
-    created_at: string;
-    updated_at: string;
-  }>;
-
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-  `);
-
-  // Map RAG source types to knowledge types
-  const typeMap: Record<string, KnowledgeType> = {
-    'context': 'context',
-    'research': 'research',
-    'archive': 'archive',
-    'daily': 'daily',
-    'transcript': 'transcript',
-    'session': 'session',
-    'ticket': 'ticket',
-    'digest': 'digest',
-  };
-
-  let count = 0;
-  const txn = db.transaction(() => {
-    for (const chunk of chunks) {
-      const knowledgeType = typeMap[chunk.source_type] ?? (chunk.source_type as KnowledgeType);
-      const id = randomUUID();
-      const metadata = {
-        source_file: chunk.source_file,
-        chunk_index: chunk.chunk_index,
-        original_chunk_id: chunk.id,
-        ...(chunk.metadata ? JSON.parse(chunk.metadata) : {}),
-      };
-
-      const key = `${chunk.source_file}-chunk-${chunk.chunk_index}`;
-
-      const result = stmt.run(
-        id,
-        knowledgeType,
-        key,
-        chunk.content,
-        JSON.stringify(metadata),
-        chunk.created_at,
-        chunk.updated_at,
-      );
-      if (result.changes > 0) count++;
-    }
-  });
-
-  txn();
-  return count;
-}

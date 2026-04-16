@@ -1,10 +1,12 @@
 // F9 — Corrections (self-verification)
 export {
   initDb,
+  runMigration,
   resolveId,
   addCorrection,
   getCorrection,
   listCorrections,
+  searchCorrections,
   recordViolation,
   graduateCorrection,
   deleteCorrection,
@@ -55,6 +57,7 @@ export {
   addPrediction,
   getPrediction,
   listPredictions,
+  revisePrediction,
   resolvePrediction,
   getPendingReview,
   getCalibration,
@@ -62,9 +65,11 @@ export {
 
 export type {
   Prediction,
+  PredictionRevision,
   Domain,
   Outcome,
   AddPredictionInput,
+  ListPredictionsOpts,
   CalibrationResult,
 } from './predictions.js';
 
@@ -100,77 +105,9 @@ export type {
   CalibrationReportData,
 } from './calibration.js';
 
-// F7 — Events
-export {
-  initEvents,
-  logEvent,
-  logSessionStart,
-  logSessionEnd,
-  logMessageReceived,
-  getRecentEvents,
-  getActiveSessions,
-  pruneOldEvents,
-  getEventStats,
-} from './events.js';
-
-export type {
-  Event,
-  ActiveSession,
-  EventStats,
-} from './events.js';
-
-// F7 — Awareness
-export {
-  compileAwarenessContext,
-  getConcurrentSessionHint,
-} from './awareness.js';
-
-export type {
-  AwarenessOpts,
-} from './awareness.js';
-
 // L2.5 — Epistemic Digest
 export { compileDigest } from './digest.js';
 export type { DigestOpts, DigestResult, DigestStats } from './digest.js';
-
-// F2 — Learning
-export {
-  extractUrls,
-  extractBeliefs,
-  extractTopics,
-  extractCorrections,
-} from './learning.js';
-
-export type {
-  ExtractedBelief,
-  ExtractedTopic,
-  ExtractedCorrection,
-} from './learning.js';
-
-// F3+F4 — Metacognition
-export {
-  analyzeCycling,
-  getCyclingIntervention,
-  categorizeContent,
-  calculateAlignmentScore,
-  analyzeAttentionBudget,
-} from './metacognition.js';
-
-export type {
-  TextEntry,
-  CyclingAnalysis,
-  AttentionCategory,
-  AttentionAnalysis,
-} from './metacognition.js';
-
-// F5 — Distillation
-export {
-  classifyLine,
-  extractSignal,
-  buildDigest,
-  compactLog,
-  getRecurringThemes,
-} from './distill.js';
 
 // F9 — Adversarial Verification
 export {
@@ -208,14 +145,12 @@ export {
   deleteKnowledge,
   deleteKnowledgeByType,
   searchKnowledge,
-  searchKnowledgeHybrid,
   getKnowledgeStats,
   importBeliefsToKnowledge,
   importCorrectionsToKnowledge,
   importPositionsToKnowledge,
   importPredictionsToKnowledge,
   importAllToKnowledge,
-  importChunksToKnowledge,
   MetadataFilter,
   OrderBy,
 } from './knowledge.js';
@@ -228,18 +163,18 @@ export type {
   ListKnowledgeInternalOpts,
   MetadataFilter as MetadataFilterType,
   OrderByExpr,
-  EmbedFn,
 } from './knowledge.js';
+
+// Dashboard
+export { getDashboardData, startDashboard } from './dashboard.js';
+export type { DashboardData } from './dashboard.js';
 
 // F10 — Context Compiler
 export {
   assembleContext,
-  DEFAULT_SESSION_LAYERS,
 } from './compiler.js';
 
 export type {
-  SessionType,
-  SessionLayerItem,
   AssembleContextOpts,
   AssembleContextResult,
   MaintenanceItems,

@@ -39,6 +39,7 @@ export interface AddPositionInput {
 
 export interface ListPositionsOpts {
   status?: PositionStatus;
+  limit?: number;
 }
 
 const SCHEMA = `
@@ -98,6 +99,9 @@ export function listPositions(db: Database.Database, opts?: ListPositionsOpts): 
   }
 
   sql += ' ORDER BY created_at DESC';
+  const limit = opts?.limit ?? 100;
+  sql += ' LIMIT ?';
+  params.push(limit);
   return db.prepare(sql).all(...params) as Position[];
 }
 

@@ -5,6 +5,7 @@ import {
   addPrediction,
   getPrediction,
   listPredictions,
+  revisePrediction,
   resolvePrediction,
   getPendingReview,
   getCalibration,
@@ -215,6 +216,70 @@ describe('getPendingReview', () => {
     const futureDate = new Date(Date.now() + 86400000 * 30).toISOString();
     addPrediction(db, { topic: 'T', prediction: 'P', confidence: 0.8, check_date: futureDate });
     expect(getPendingReview(db)).toHaveLength(0);
+  });
+});
+
+describe('revisePrediction', () => {
+  it('updates prediction in-place', () => {
+    const id = addPrediction(db, { topic: 'Weather', prediction: 'It will rain', confidence: 0.7 });
+    const resultId = revisePrediction(db, id, { prediction: 'It will snow', confidence: 0.5, reason: 'Changed forecast' });
+    expect(resultId).toBe(id);
+
+    const p = getPrediction(db, id)!;
+    expect(p.prediction).toBe('It will snow');
+    expect(p.confidence).toBe(0.5);
+  });
+
+  it('records revision history', () => {
+    const id = addPrediction(db, { topic: 'Weather', prediction: 'Rain', confidence: 0.7, reasoning: 'Cloudy' });
+    revisePrediction(db, id, { prediction: 'Snow', confidence: 0.5, reason: 'Temperature dropped' });
+
+    const p = getPrediction(db, id)!;
+    expect(p.revision_history).toHaveLength(1);
+    expect(p.revision_history[0].previous_prediction).toBe('Rain');
+    expect(p.revision_history[0].previous_confidence).toBe(0.7);
+    expect(p.revision_history[0].previous_reasoning).toBe('Cloudy');
+    expect(p.revision_history[0].reason).toBe('Temperature dropped');
+  });
+
+  it('supports multiple revisions', () => {
+    const id = addPrediction(db, { topic: 'T', prediction: 'P1', confidence: 0.8 });
+    revisePrediction(db, id, { prediction: 'P2', confidence: 0.6, reason: 'Revision 1' });
+    revisePrediction(db, id, { prediction: 'P3', confidence: 0.4, reason: 'Revision 2' });
+
+    const p = getPrediction(db, id)!;
+    expect(p.prediction).toBe('P3');
+    expect(p.confidence).toBe(0.4);
+    expect(p.revision_history).toHaveLength(2);
+    expect(p.revision_history[0].previous_prediction).toBe('P1');
+    expect(p.revision_history[1].previous_prediction).toBe('P2');
+  });
+
+  it('returns undefined for resolved prediction', () => {
+    const id = addPrediction(db, { topic: 'T', prediction: 'P', confidence: 0.8 });
+    resolvePrediction(db, id, 'correct');
+    const result = revisePrediction(db, id, { prediction: 'Updated' });
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined for nonexistent prediction', () => {
+    const result = revisePrediction(db, 'nonexistent', { prediction: 'Updated' });
+    expect(result).toBeUndefined();
+  });
+
+  it('does not void the original (in-place update)', () => {
+    const id = addPrediction(db, { topic: 'T', prediction: 'Original', confidence: 0.8 });
+    revisePrediction(db, id, { prediction: 'Revised' });
+    const p = getPrediction(db, id)!;
+    expect(p.outcome).toBeNull(); // Not voided
+    expect(p.prediction).toBe('Revised');
+  });
+
+  it('defaults reason to Revised', () => {
+    const id = addPrediction(db, { topic: 'T', prediction: 'P1', confidence: 0.8 });
+    revisePrediction(db, id, { prediction: 'P2' });
+    const p = getPrediction(db, id)!;
+    expect(p.revision_history[0].reason).toBe('Revised');
   });
 });
 
