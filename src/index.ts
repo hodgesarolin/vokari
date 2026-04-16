@@ -162,6 +162,10 @@ export type {
   OrderByExpr,
 } from './knowledge.js';
 
+// Dashboard
+export { getDashboardData, startDashboard } from './dashboard.js';
+export type { DashboardData } from './dashboard.js';
+
 // F10 — Context Compiler
 export {
   assembleContext,

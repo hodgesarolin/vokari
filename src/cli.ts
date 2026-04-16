@@ -4,19 +4,32 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { initDb, addCorrection, getContext, getStats } from './db.js';
 import type { CorrectionType, Permanence } from './db.js';
+import { initBeliefs, getBeliefStats } from './beliefs.js';
+import { initPredictions, listPredictions, getPendingReview } from './predictions.js';
+import { initPositions } from './positions.js';
+import { initVerifications, verificationStatus } from './verification.js';
+import { initKnowledge } from './knowledge.js';
+import { calibrationReport } from './calibration.js';
+import { startDashboard } from './dashboard.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
 
 function usage(): void {
   console.log(`Usage:
-  epistemic import <corrections.md> [--db <path>]   Import corrections from markdown
-  epistemic context [--budget <chars>] [--db <path>] Print context block
-  epistemic stats [--db <path>]                      Print store statistics
+  vokari import <corrections.md> [--db <path>]     Import corrections from markdown
+  vokari context [--budget <chars>] [--db <path>]  Print context block
+  vokari stats [--db <path>]                       Print store statistics
+  vokari calibration [--db <path>]                 Print calibration report
+  vokari beliefs [--db <path>]                     Print belief statistics
+  vokari predictions [--db <path>]                 List pending predictions
+  vokari verify [--db <path>]                      Print verification status
+  vokari dashboard [--port 3939] [--db <path>]     Start calibration dashboard
 
 Options:
-  --db <path>    Database path (default: ./epistemic.db)
-  --budget <n>   Context budget in characters (default: 4000)`);
+  --db <path>    Database path (default: ./epistemic.db or EPISTEMIC_DB env)
+  --budget <n>   Context budget in characters (default: 4000)
+  --port <n>     Dashboard port (default: 3939)`);
 }
 
 function getArg(flag: string): string | undefined {
@@ -164,6 +177,69 @@ if (command === 'import') {
   console.log(`By permanence: never=${s.by_permanence.never}, conditional=${s.by_permanence.conditional}, graduable=${s.by_permanence.graduable}`);
   console.log(`Total violations: ${s.total_violations}`);
   db.close();
+
+} else if (command === 'calibration') {
+  const db = initDb(dbPath);
+  initPredictions(db);
+  console.log(calibrationReport(db));
+  db.close();
+
+} else if (command === 'beliefs') {
+  const db = initDb(dbPath);
+  initBeliefs(db);
+  const s = getBeliefStats(db);
+  console.log(`Total: ${s.total}`);
+  console.log(`Active: ${s.byStatus.active}, Challenged: ${s.byStatus.challenged}, Revised: ${s.byStatus.revised}, Retired: ${s.byStatus.retired}`);
+  console.log(`By category: user=${s.byCategory.user}, system=${s.byCategory.system}, world=${s.byCategory.world}, self=${s.byCategory.self}`);
+  console.log(`Contradictions: ${s.totalContradictions}`);
+  if (s.challenged.length > 0) {
+    console.log('\nChallenged beliefs:');
+    for (const b of s.challenged) {
+      console.log(`  [${b.id.slice(0, 8)}] ${b.statement} (${b.contradictionCount} contradictions)`);
+    }
+  }
+  db.close();
+
+} else if (command === 'predictions') {
+  const db = initDb(dbPath);
+  initPredictions(db);
+  const pending = getPendingReview(db);
+  if (pending.length === 0) {
+    console.log('No predictions due for review.');
+  } else {
+    console.log(`${pending.length} prediction(s) due for review:\n`);
+    for (const p of pending) {
+      console.log(`  [${p.id.slice(0, 8)}] ${p.prediction}`);
+      console.log(`    Confidence: ${Math.round(p.confidence * 100)}% | Domain: ${p.domain} | Check: ${p.check_date}`);
+    }
+  }
+  const all = listPredictions(db, { resolved: false });
+  console.log(`\n${all.length} total pending predictions.`);
+  db.close();
+
+} else if (command === 'verify') {
+  const db = initDb(dbPath);
+  initBeliefs(db);
+  initVerifications(db);
+  const s = verificationStatus(db);
+  console.log(`Total verifications: ${s.total}`);
+  console.log(`Status: pending=${s.by_status.pending}, in_progress=${s.by_status.in_progress}, completed=${s.by_status.completed}, skipped=${s.by_status.skipped}`);
+  console.log(`Outcomes: confirmed=${s.by_outcome.confirmed}, revised=${s.by_outcome.revised}, contradicted=${s.by_outcome.contradicted}, inconclusive=${s.by_outcome.inconclusive}`);
+  console.log(`Coverage: ${s.beliefs_verified} verified, ${s.beliefs_never_verified} never verified`);
+  if (s.average_time_to_verify_hours !== null) {
+    console.log(`Avg verify time: ${s.average_time_to_verify_hours.toFixed(1)}h`);
+  }
+  db.close();
+
+} else if (command === 'dashboard') {
+  const port = parseInt(getArg('--port') ?? '3939', 10);
+  const db = initDb(dbPath);
+  initBeliefs(db);
+  initPredictions(db);
+  initPositions(db);
+  initVerifications(db);
+  initKnowledge(db);
+  startDashboard(db, port);
 
 } else {
   usage();
