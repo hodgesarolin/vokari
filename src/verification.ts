@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import type { Belief } from './beliefs.js';
-import { resolveId } from './db.js';
+import { resolveId, runMigration } from './db.js';
 
 // ── Types ──
 
@@ -103,17 +103,20 @@ const SCHEMA = `
     completed_at TEXT
   );
 
-  CREATE INDEX IF NOT EXISTS idx_verifications_belief ON verifications(belief_id);
+  CREATE INDEX IF NOT EXISTS idx_verifications_belief_id ON verifications(belief_id);
   CREATE INDEX IF NOT EXISTS idx_verifications_status ON verifications(status);
 `;
 
 // ── Helpers ──
 
 function rowToVerification(row: VerificationRow): Verification {
-  return {
-    ...row,
-    evidence: JSON.parse(row.evidence) as string[],
-  };
+  let evidence: string[] = [];
+  try {
+    evidence = JSON.parse(row.evidence) as string[];
+  } catch {
+    // Malformed JSON — treat as empty evidence rather than crashing the caller.
+  }
+  return { ...row, evidence };
 }
 
 // ── Core Functions ──
@@ -123,6 +126,12 @@ function rowToVerification(row: VerificationRow): Verification {
  */
 export function initVerifications(db: Database.Database): void {
   db.exec(SCHEMA);
+  // Drop the old misnamed index (renamed to idx_verifications_belief_id).
+  runMigration(
+    db,
+    'verifications_drop_old_belief_index',
+    'DROP INDEX IF EXISTS idx_verifications_belief',
+  );
 }
 
 /**

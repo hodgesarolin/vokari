@@ -1,10 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { initDb } from './db.js';
 import {
-  initDb, addCorrection, getCorrection, listCorrections,
+  addCorrection, getCorrection, listCorrections,
   searchCorrections, recordViolation, graduateCorrection, getContext, getStats,
-} from './db.js';
+} from './corrections.js';
 import {
   initKnowledge, addKnowledge, getKnowledge, getKnowledgeByKey,
   updateKnowledge, upsertKnowledge, deleteKnowledge,

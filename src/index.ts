@@ -1,8 +1,13 @@
-// F9 — Corrections (self-verification)
+// Core DB
 export {
   initDb,
   runMigration,
   resolveId,
+} from './db.js';
+
+// F9 — Corrections (self-verification)
+export {
+  initCorrections,
   addCorrection,
   getCorrection,
   listCorrections,
@@ -12,14 +17,14 @@ export {
   deleteCorrection,
   getContext,
   getStats,
-} from './db.js';
+} from './corrections.js';
 
 export type {
   Correction,
   CorrectionType,
   Permanence,
   AddCorrectionInput,
-} from './db.js';
+} from './corrections.js';
 
 // F1 — Beliefs
 export {

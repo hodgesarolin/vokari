@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import http from 'http';
 import { initDb } from '../src/db.js';
-import { addCorrection } from '../src/db.js';
+import { addCorrection } from '../src/corrections.js';
 import { initBeliefs, addBelief } from '../src/beliefs.js';
 import { initPredictions, addPrediction, resolvePrediction } from '../src/predictions.js';
 import { initPositions } from '../src/positions.js';

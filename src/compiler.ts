@@ -16,7 +16,7 @@
  */
 
 import type Database from 'better-sqlite3';
-import { getContext as getCorrectionContext } from './db.js';
+import { getContext as getCorrectionContext } from './corrections.js';
 import { getBeliefContext } from './beliefs.js';
 import { getPositionContext } from './positions.js';
 import { getPendingReview } from './predictions.js';

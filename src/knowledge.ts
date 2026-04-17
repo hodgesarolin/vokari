@@ -7,15 +7,13 @@
  * - Content (the actual text)
  * - Metadata (JSON — confidence, status, evidence, tags, etc.)
  * - FTS5 index (keyword search via triggers)
- * - Optional embedding support (384-dim vector via sqlite-vec, pluggable)
  *
  * Design principles:
  * - One table, many types. SQL filters narrow by type.
- * - Semantic search across ALL knowledge simultaneously.
+ * - Keyword search across ALL knowledge simultaneously via FTS5.
  * - Mutable rows (handoff) overwrite; immutable rows append/version.
- * - All existing MCP tool contracts preserved — they read/write knowledge
- *   filtered by type.
- * - FTS5 is the workhorse; vector search is opt-in enhancement.
+ * - Type is an open string — hosts may write arbitrary types alongside
+ *   the documented ones used by Vokari's own modules.
  */
 
 import type Database from 'better-sqlite3';

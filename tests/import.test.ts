@@ -12,7 +12,7 @@ import { initDb } from '../src/db.js';
 import { initBeliefs, addBelief } from '../src/beliefs.js';
 import { initPositions, addPosition } from '../src/positions.js';
 import { initPredictions, addPrediction } from '../src/predictions.js';
-import { addCorrection } from '../src/db.js';
+import { addCorrection } from '../src/corrections.js';
 
 /** Helper to get count by type from stats.byType array */
 function countByType(stats: { byType: { type: string; count: number }[] }, type: string): number {
