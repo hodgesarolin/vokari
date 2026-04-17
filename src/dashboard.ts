@@ -323,7 +323,7 @@ function dashboardHtml(): string {
 /**
  * Start the dashboard HTTP server.
  */
-export function startDashboard(db: Database.Database, port: number = 3838): ReturnType<typeof createServer> {
+export function startDashboard(db: Database.Database, port: number = 3838, host: string = '127.0.0.1'): ReturnType<typeof createServer> {
   const server = createServer((req, res) => {
     const url = req.url ?? '/';
 
@@ -374,8 +374,8 @@ export function startDashboard(db: Database.Database, port: number = 3838): Retu
     }
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    console.log(`Vokari dashboard: http://localhost:${port}`);
+  server.listen(port, host, () => {
+    console.log(`Vokari dashboard: http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`);
   });
 
   return server;
