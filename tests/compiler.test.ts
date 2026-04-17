@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { initDb } from '../src/db.js';
-import { addCorrection } from '../src/db.js';
+import { addCorrection } from '../src/corrections.js';
 import { addBelief } from '../src/beliefs.js';
 import { addPosition } from '../src/positions.js';
 import { addPrediction } from '../src/predictions.js';

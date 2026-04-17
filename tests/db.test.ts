@@ -4,6 +4,8 @@ import {
   initDb,
   runMigration,
   resolveId,
+} from '../src/db.js';
+import {
   addCorrection,
   getCorrection,
   listCorrections,
@@ -13,7 +15,7 @@ import {
   deleteCorrection,
   getContext,
   getStats,
-} from '../src/db.js';
+} from '../src/corrections.js';
 
 let db: Database.Database;
 

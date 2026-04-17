@@ -2,8 +2,9 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
-import { initDb, addCorrection, getContext, getStats } from './db.js';
-import type { CorrectionType, Permanence } from './db.js';
+import { initDb } from './db.js';
+import { addCorrection, getContext, getStats } from './corrections.js';
+import type { CorrectionType, Permanence } from './corrections.js';
 import { initBeliefs, getBeliefStats } from './beliefs.js';
 import { initPredictions, listPredictions, getPendingReview } from './predictions.js';
 import { initPositions } from './positions.js';

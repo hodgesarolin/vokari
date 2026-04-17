@@ -23,7 +23,7 @@ import {
 import type { KnowledgeType } from '../src/knowledge.js';
 import { initDb } from '../src/db.js';
 import { addBelief, initBeliefs } from '../src/beliefs.js';
-import { addCorrection } from '../src/db.js';
+import { addCorrection } from '../src/corrections.js';
 import { addPosition, initPositions } from '../src/positions.js';
 import { addPrediction, initPredictions } from '../src/predictions.js';
 
