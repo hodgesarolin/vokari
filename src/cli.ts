@@ -27,13 +27,14 @@ function usage(): void {
   vokari beliefs [--db <path>]                     Print belief statistics
   vokari predictions [--db <path>]                 List pending predictions
   vokari verify [--db <path>]                      Print verification status
-  vokari serve [--dashboard] [--port <n>] [--db <path>]   Start MCP server (+ optional dashboard)
-  vokari dashboard [--port <n>] [--db <path>]      Start calibration dashboard
+  vokari serve [--dashboard] [--port <n>] [--host <addr>] [--db <path>]  Start MCP server (+ optional dashboard)
+  vokari dashboard [--port <n>] [--host <addr>] [--db <path>]           Start calibration dashboard
 
 Options:
   --db <path>    Database path (default: ./epistemic.db or EPISTEMIC_DB env)
   --budget <n>   Context budget in characters (default: 4000)
   --port <n>     Dashboard port (default: 3838)
+  --host <addr>  Dashboard bind address (default: 127.0.0.1, use 0.0.0.0 for network)
   --out <path>   Export output path (default: stdout)`);
 }
 
@@ -339,9 +340,10 @@ if (command === 'init') {
 } else if (command === 'serve') {
   if (hasFlag('--dashboard')) {
     const port = parseInt(getArg('--port') ?? '3838', 10);
+    const host = getArg('--host') ?? '127.0.0.1';
     const db = initDb(dbPath);
     initKnowledge(db);
-    startDashboard(db, port);
+    startDashboard(db, port, host);
   }
 
   // Start the full MCP server (server.ts is the real entry point with all tool registrations).
@@ -351,13 +353,14 @@ if (command === 'init') {
 
 } else if (command === 'dashboard') {
   const port = parseInt(getArg('--port') ?? '3838', 10);
+  const host = getArg('--host') ?? '0.0.0.0';
   const db = initDb(dbPath);
   initBeliefs(db);
   initPredictions(db);
   initPositions(db);
   initVerifications(db);
   initKnowledge(db);
-  startDashboard(db, port);
+  startDashboard(db, port, host);
 
 } else {
   usage();
