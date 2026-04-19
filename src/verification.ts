@@ -132,6 +132,34 @@ export function initVerifications(db: Database.Database): void {
     'verifications_drop_old_belief_index',
     'DROP INDEX IF EXISTS idx_verifications_belief',
   );
+  // Before adding the partial unique index, dedupe any existing duplicate
+  // active rows. Pre-fix DBs could accumulate multiple pending/in_progress
+  // verifications per belief (the bug we're fixing). If we tried CREATE
+  // UNIQUE INDEX straight away on such a DB, it would throw.
+  //
+  // Strategy: for each belief with multiple active rows, keep the most
+  // recently-created one active and mark the rest as 'skipped' (preserves
+  // history — we don't delete any row).
+  runMigration(
+    db,
+    'verifications_dedupe_active_before_unique_index',
+    `UPDATE verifications
+       SET status = 'skipped'
+     WHERE id IN (
+       SELECT id FROM (
+         SELECT id, belief_id, status, created_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY belief_id
+                  ORDER BY
+                    CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                    created_at DESC
+                ) AS rn
+         FROM verifications
+         WHERE status IN ('pending', 'in_progress')
+       )
+       WHERE rn > 1
+     )`,
+  );
   // Partial unique index: only one ACTIVE (pending/in_progress) verification
   // per belief. Closes a check-then-insert race in createVerification — two
   // concurrent callers previously could both pass the "no existing active"

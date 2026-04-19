@@ -720,6 +720,60 @@ describe('BRAIN-158: partial unique index on active verifications', () => {
   });
 });
 
+describe('BRAIN-158: upgrade path — dedupe before unique index', () => {
+  it('handles legacy DB with duplicate active rows per belief (pre-fix state)', () => {
+    // Simulate a pre-fix DB: fresh tables WITHOUT the dedupe/unique-index
+    // migrations, then insert two active verifications for the same belief,
+    // then "upgrade" by calling initVerifications (which runs the migrations).
+    const fresh = new Database(':memory:');
+    fresh.pragma('journal_mode = WAL');
+    // Minimal belief table + row so FK is satisfied
+    fresh.exec(`
+      CREATE TABLE beliefs (id TEXT PRIMARY KEY);
+      INSERT INTO beliefs (id) VALUES ('b1');
+    `);
+    // Verifications table WITHOUT the unique index
+    fresh.exec(`
+      CREATE TABLE verifications (
+        id TEXT PRIMARY KEY,
+        belief_id TEXT NOT NULL REFERENCES beliefs(id),
+        status TEXT DEFAULT 'pending',
+        strategy TEXT DEFAULT 'manual',
+        outcome TEXT,
+        evidence TEXT DEFAULT '[]',
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        started_at TEXT,
+        completed_at TEXT
+      )
+    `);
+    // Two duplicate active rows
+    fresh.prepare(`
+      INSERT INTO verifications (id, belief_id, status, created_at) VALUES
+        ('v-old', 'b1', 'pending', '2026-01-01 00:00:00'),
+        ('v-new', 'b1', 'pending', '2026-04-01 00:00:00')
+    `).run();
+
+    // Running initVerifications (the migration path) must NOT throw.
+    expect(() => initVerifications(fresh)).not.toThrow();
+
+    // Post-migration: the newer row stays active, the older is skipped.
+    const rows = fresh.prepare(
+      `SELECT id, status FROM verifications ORDER BY created_at ASC`
+    ).all() as Array<{ id: string; status: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0].status).toBe('skipped');
+    expect(rows[1].status).toBe('pending');
+
+    // And the unique index now exists.
+    const idxRows = fresh.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_verifications_active_unique'`
+    ).all();
+    expect(idxRows).toHaveLength(1);
+    fresh.close();
+  });
+});
+
 describe('BRAIN-158: oldest_unverified_days uses MAX', () => {
   it('returns the OLDEST (largest) age among unverified beliefs', () => {
     // A fresh belief (today)
