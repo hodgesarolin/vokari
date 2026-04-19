@@ -1,25 +1,25 @@
 # Vokari
 
-Epistemic integrity engine for AI agents. Track what your agent believes, verify it's correct, measure calibration over time.
+**The black box for your AI agent.** Tracks what the agent claimed, how confident it was, whether it was right, and whether it's learning — via the Model Context Protocol (MCP).
 
-> Memory systems remember. Vokari verifies.
+Local SQLite. Three npm dependencies. No cloud, no embeddings, no LLM calls from inside Vokari. You bring the agent; Vokari does the bookkeeping.
 
 ## 30-Second Quickstart
 
 ```bash
-npx vokari init
-npx vokari serve --dashboard
+npx -y @vokari/epistemic init
+npx -y @vokari/epistemic serve --dashboard
 # Open http://localhost:3838
 ```
 
-Add to your MCP client config (Claude Code, Cursor, etc.):
+Add to your MCP client config (Claude Code, Cursor, Windsurf, etc.):
 
 ```json
 {
   "mcpServers": {
     "vokari": {
       "command": "npx",
-      "args": ["@vokari/epistemic"],
+      "args": ["-y", "@vokari/epistemic", "serve"],
       "env": {
         "EPISTEMIC_DB": "./epistemic.db"
       }
@@ -28,13 +28,20 @@ Add to your MCP client config (Claude Code, Cursor, etc.):
 }
 ```
 
-## Why Vokari
+## Category
 
-The agent memory space is crowded — Mem0, Zep, Letta, YantrikDB all solve memory retrieval. None of them solve epistemic integrity: is what the agent believes actually *correct*, and is it getting more accurate over time?
+Vokari is a **local epistemic-state sidecar** for agents. It's not a memory retrieval system (that's Mem0, Zep, Letta, Graphiti); it's not an eval/observability platform (that's Phoenix, LangSmith, Inspect AI). It sits next to both.
 
-Vokari tracks predictions with Brier score calibration, adversarially self-verifies beliefs on a scheduled tick, models epistemic positions with revision history, and provides calibration dashboards showing where an agent is systematically overconfident. No other tool does this.
+| Category | Example | What it does |
+|----------|---------|--------------|
+| Memory retrieval | Mem0, Zep, Letta, Graphiti | Remembers what users said; retrieves with embeddings/graphs |
+| Eval / observability | Phoenix, LangSmith, Inspect AI | Evaluates runs and traces after the fact |
+| **Epistemic sidecar** | **Vokari** | **Tracks live agent beliefs, predictions, corrections, calibration — in-process, continuous** |
 
-**Mem0 remembers what users said. Vokari tracks whether the agent's knowledge is right.**
+The pitches:
+- Mem0 remembers what users said.
+- Phoenix grades what already ran.
+- **Vokari records what the agent is committing to right now, and whether it was wrong.**
 
 ## Core Concepts
 
@@ -144,24 +151,35 @@ const cal = getCalibration(db);
 | `search_knowledge` | FTS5 search across all knowledge |
 | `knowledge_stats` | Store statistics |
 
-## Comparison
+## Comparison vs. eval / observability tools
 
-| Feature | Vokari | Mem0 | Zep/Graphiti | YantrikDB |
-|---------|--------|------|--------------|-----------|
-| Memory storage | SQLite | Cloud/Redis | PostgreSQL | MongoDB |
-| Full-text search | FTS5 | Embedding | Embedding | Embedding |
-| Beliefs with confidence | **Yes** | No | No | No |
-| Predictions + calibration | **Yes** | No | No | No |
-| Self-correction tracking | **Yes** | No | No | No |
-| Adversarial verification | **Yes** | No | No | No |
-| Brier score calibration | **Yes** | No | No | No |
-| Position tracking | **Yes** | No | No | No |
-| Calibration dashboard | **Yes** | No | No | No |
-| Vector/embedding search | No | Yes | Yes | Yes |
-| Entity graph | No | No | Yes | No |
-| External dependencies | SQLite only | Cloud | PostgreSQL | MongoDB |
+This is the closer competitive set — these are the things Vokari is adjacent to.
 
-Vokari complements these tools — use Mem0 or Zep for memory retrieval, Vokari for epistemic integrity.
+| Axis | Phoenix | LangSmith | Inspect AI | **Vokari** |
+|---|---|---|---|---|
+| When it runs | After a run | After a run | Batch eval | **Continuous, live** |
+| What it sees | Traces | Traces | Prompts + responses | **Agent's own belief state** |
+| Storage model | Postgres/Arize cloud | LangChain cloud | Files/JSON | **Local SQLite** |
+| Persistence | Retention policy | Retention policy | Ad-hoc | **Owned by your agent** |
+| MCP-native | No | No | No | **Yes** |
+| Brier calibration | Via custom eval | Via custom eval | Via scorer | **First-class** |
+| Corrections w/ streaks | No | No | No | **Yes** |
+| Adversarial self-verification | No | No | No | **Yes** |
+| Runs offline | Depends | No (cloud) | Yes | **Yes** |
+| LLM calls from the tool | Optional | Optional | Optional | **No (deterministic)** |
+
+## Comparison vs. memory retrieval tools
+
+This is the *complementary* set — use Vokari WITH one of these, not INSTEAD OF.
+
+| Axis | Mem0 | Zep/Graphiti | Letta | **Vokari** |
+|---|---|---|---|---|
+| Primary job | Remember what users said | Graph memory + temporal search | Stateful agent runtime | **Track agent's epistemic commitments** |
+| Retrieval | Embeddings | Embeddings + graph | Embeddings | **FTS5 keyword only** |
+| Deploys | Cloud / self-host | Cloud / self-host | Cloud / self-host | **Local binary, SQLite file** |
+| External deps | ~40 | Postgres + embeddings | Postgres + embeddings | **3** |
+
+Use Mem0/Zep/Letta for memory retrieval. Use Vokari for whether the memory (or the agent's inferences from it) are right.
 
 ## CLI
 
@@ -185,10 +203,47 @@ vokari import <file>                        # Import corrections.md or JSON back
 |----------|---------|-------------|
 | `EPISTEMIC_DB` | `./epistemic.db` | SQLite database path |
 
+## What Vokari is deliberately NOT
+
+Explicit non-goals. Proposals that fit these categories are closed without discussion:
+
+- **Vector / embedding search.** FTS5 is the only search. Bring your own retrieval if you want semantic matching — Vokari's job is the epistemic ledger, not the memory index.
+- **LLM calls from inside Vokari.** The agent does reasoning; Vokari records what it committed to. Keeps behaviour deterministic and auditable.
+- **Multi-tenancy / RBAC in open-source.** Single-process, single-user. Team use cases belong in a (future) hosted tier.
+- **Autonomous truth oracle.** Vokari doesn't prove a belief is *correct*. It records that the agent asserted the belief at a given confidence, whether it was confirmed or contradicted later, and whether confidence tracked outcomes. Truth is the agent's problem; Vokari is the black box.
+- **Replacement for tracing / eval platforms.** Phoenix, LangSmith, Inspect AI, Arize are complementary. Vokari doesn't ingest traces or datasets — it records the agent's own claims in flight.
+
+## Failure-mode contract
+
+Vokari is strict about *knowing what it doesn't know*. Every query that can produce an ambiguous answer does so explicitly:
+
+| Condition | How Vokari reports it |
+|---|---|
+| Calibration with < 5 resolved predictions | `direction: 'well-calibrated', magnitude: 0, details: 'Insufficient data (N predictions)…'` |
+| No predictions in a domain | Domain absent from `by_domain` array |
+| Verification tick with nothing due | Empty `items[]`, `total_pending: 0` |
+| Concurrent `createVerification` on same belief | Returns existing verification ID, no second row (enforced by partial unique index) |
+| Migration partially applied | `runMigration` wraps SQL + `_migrations` record in one transaction — atomic |
+| Malformed JSON in stored evidence | `safeJsonParse` returns `[]` fallback, no process crash |
+
+Planned for v1.0:
+- Result shapes include explicit `status: 'ok' | 'insufficient-data' | 'degraded'` fields where applicable.
+- MCP tool responses surface the same statuses so agents can branch on them.
+
 ## Requirements
 
 - Node.js >= 18
-- better-sqlite3 (compiled native module)
+- `better-sqlite3` (native module, prebuilt binaries for common platforms)
+
+## Development
+
+```bash
+npm ci
+npm run build
+npm test          # full suite, includes MCP protocol integration tests
+```
+
+CI runs the matrix on Node 18/20/22 × ubuntu/macos.
 
 ## License
 
