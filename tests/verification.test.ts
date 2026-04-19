@@ -664,12 +664,14 @@ describe('opportunisticVerification', () => {
       UPDATE verifications SET started_at = datetime('now', '-3 hours') WHERE id = ?
     `).run(item1!.verificationId);
 
-    // Should reclaim and re-pick the same belief
+    // Should reclaim and re-pick the same belief.
+    // BRAIN-158 audit: partial unique index enforces one-active-per-belief,
+    // so the reclaimed pending row is promoted back to in_progress in-place
+    // rather than creating a second row. Same verification ID, new claim.
     const item2 = opportunisticVerification(db);
     expect(item2).not.toBeNull();
     expect(item2!.beliefId).toBe(beliefId);
-    // New verification ID (old one was reset to pending, this is a new claim)
-    expect(item2!.verificationId).not.toBe(item1!.verificationId);
+    expect(item2!.verificationId).toBe(item1!.verificationId);
   });
 
   it('prioritizes never-verified over stale', () => {
@@ -681,5 +683,54 @@ describe('opportunisticVerification', () => {
     const item = opportunisticVerification(db);
     expect(item).not.toBeNull();
     expect(item!.beliefId).toBe(b2);
+  });
+});
+
+describe('BRAIN-158: partial unique index on active verifications', () => {
+  let beliefId: string;
+  beforeEach(() => {
+    beliefId = addBelief(db, { statement: 'test', category: 'world', confidence: 0.5 });
+  });
+
+  it('rejects a direct duplicate INSERT of an active verification', () => {
+    createVerification(db, beliefId, 'manual');
+    // Direct INSERT bypassing createVerification — partial unique index
+    // should refuse it.
+    expect(() => {
+      db.prepare(`
+        INSERT INTO verifications (id, belief_id, strategy, status)
+        VALUES (?, ?, 'manual', 'pending')
+      `).run('second-id-1234567890', beliefId);
+    }).toThrow(/UNIQUE/);
+  });
+
+  it('allows a new active verification after the first completes', () => {
+    const v1 = createVerification(db, beliefId, 'manual');
+    recordVerification(db, v1!, 'confirmed', { notes: 'done' });
+    // Now a new active one is allowed
+    const v2 = createVerification(db, beliefId, 'manual');
+    expect(v2).toBeDefined();
+    expect(v2).not.toBe(v1);
+  });
+
+  it('createVerification is idempotent under concurrent calls', () => {
+    const v1 = createVerification(db, beliefId, 'manual');
+    const v2 = createVerification(db, beliefId, 'manual');
+    expect(v2).toBe(v1);
+  });
+});
+
+describe('BRAIN-158: oldest_unverified_days uses MAX', () => {
+  it('returns the OLDEST (largest) age among unverified beliefs', () => {
+    // A fresh belief (today)
+    addBelief(db, { statement: 'fresh belief', category: 'world', confidence: 0.5 });
+    // An old belief — backdate via direct UPDATE since addBelief sets first_recorded
+    const oldId = addBelief(db, { statement: 'old belief', category: 'world', confidence: 0.5 });
+    db.prepare(`UPDATE beliefs SET first_recorded = datetime('now', '-30 days') WHERE id = ?`).run(oldId);
+
+    const stats = verificationStatus(db);
+    // Should report the ~30-day-old belief, not the 0-day one.
+    expect(stats.oldest_unverified_days).not.toBeNull();
+    expect(stats.oldest_unverified_days!).toBeGreaterThan(25);
   });
 });
