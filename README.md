@@ -243,7 +243,7 @@ npm run build
 npm test          # full suite, includes MCP protocol integration tests
 ```
 
-CI runs the matrix on Node 18/20/22 × ubuntu/macos.
+CI runs the matrix on Node 18/20/22 × ubuntu/macOS.
 
 ## License
 

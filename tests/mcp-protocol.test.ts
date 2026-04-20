@@ -24,12 +24,11 @@ let dbPath: string;
 let client: Client;
 let transport: StdioClientTransport;
 
-// Build once before this suite so the test runs against dist/server.js
-// exactly as a real consumer would install it.
+// Build before this suite so tests always run against fresh dist/server.js.
+// Previous version skipped the build when dist/server.js existed, which let
+// the tests silently pass against a stale bundle after a source edit.
 function ensureBuild(): void {
-  if (!existsSync('dist/server.js')) {
-    execSync('npm run build', { stdio: 'inherit' });
-  }
+  execSync('npm run build', { stdio: 'inherit' });
 }
 
 beforeAll(async () => {
@@ -146,22 +145,33 @@ describe('MCP protocol — positions round-trip', () => {
 });
 
 describe('MCP protocol — verification round-trip', () => {
-  it('create_verification → verification_tick finds it', async () => {
-    const list = await client.callTool({ name: 'list_beliefs', arguments: {} });
-    const listText = (list.content as Array<{ type: string; text: string }>)[0].text;
-    // Grab the first belief's truncated ID from the list output
-    const match = listText.match(/\[([a-f0-9]{8})\]/);
-    expect(match, `list_beliefs output should contain an ID:\n${listText}`).not.toBeNull();
-    const beliefPrefix = match![1];
+  it('create_verification → verification_tick finds the queued belief', async () => {
+    // Self-contained: create a belief, queue a manual verification for it,
+    // then assert the next verification_tick surfaces it. `budget` is the
+    // real parameter name (not `limit`).
+    const add = await client.callTool({
+      name: 'add_belief',
+      arguments: {
+        statement: 'verification integration belief',
+        category: 'system',
+        confidence: 0.5,
+      },
+    });
+    const addText = (add.content as Array<{ type: string; text: string }>)[0].text;
+    const idMatch = addText.match(/Belief stored: ([a-f0-9-]{36})/i);
+    expect(idMatch, `add_belief output should contain a UUID:\n${addText}`).not.toBeNull();
+    const beliefId = idMatch![1];
 
     await client.callTool({
       name: 'create_verification',
-      arguments: { belief_id: beliefPrefix, strategy: 'manual' },
+      arguments: { belief_id: beliefId.slice(0, 8), strategy: 'manual' },
     });
-    const tick = await client.callTool({ name: 'verification_tick', arguments: { limit: 5 } });
+    const tick = await client.callTool({
+      name: 'verification_tick',
+      arguments: { budget: 5 },
+    });
     const tickText = (tick.content as Array<{ type: string; text: string }>)[0].text;
-    // Just assert the call succeeded; content depends on which belief was picked.
-    expect(tickText.length).toBeGreaterThan(0);
+    expect(tickText).toContain('verification integration belief');
   });
 });
 

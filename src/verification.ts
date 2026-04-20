@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import type { Belief } from './beliefs.js';
-import { resolveId, runMigration } from './db.js';
+import { resolveId, runMigration, now as sqliteNow } from './db.js';
 
 // ── Types ──
 
@@ -292,7 +292,7 @@ export function verificationTick(
     contradictions: string;
   }>;
 
-  const now = new Date().toISOString();
+  const now = sqliteNow();
   const claimStmt = db.prepare(`
     UPDATE verifications SET status = 'in_progress', started_at = ? WHERE id = ?
   `);
@@ -426,7 +426,7 @@ export function recordVerification(
   const verification = getVerification(db, verificationId);
   if (!verification) return undefined;
 
-  const now = new Date().toISOString();
+  const now = sqliteNow();
 
   // Wrap both updates in a transaction so verification + belief stay consistent
   const txn = db.transaction(() => {
@@ -475,7 +475,7 @@ export function skipVerification(
 ): void {
   const resolved = resolveId(db, 'verifications', verificationId);
   if (!resolved) return;
-  const now = new Date().toISOString();
+  const now = sqliteNow();
   db.prepare(`
     UPDATE verifications
     SET status = 'skipped',
@@ -565,7 +565,7 @@ export function opportunisticVerification(
     // createVerification or a reclaimed stale row), promote it to
     // in_progress rather than INSERTing a new row (the partial unique
     // index would reject that).
-    const now = new Date().toISOString();
+    const now = sqliteNow();
     const existingPending = db.prepare(`
       SELECT id FROM verifications
       WHERE belief_id = ? AND status = 'pending'
@@ -573,14 +573,24 @@ export function opportunisticVerification(
       LIMIT 1
     `).get(belief.id) as { id: string } | undefined;
 
+    // Claim the pending row CONDITIONALLY so two concurrent hosts can't
+    // both win. `AND status = 'pending'` + changes check gives us the
+    // atomic claim semantics the unique index can't reach (since both
+    // rows already share belief_id, the index is indifferent to which
+    // host wins — we need to decide).
     let vid: string;
     if (existingPending) {
       vid = existingPending.id;
-      db.prepare(`
+      const claim = db.prepare(`
         UPDATE verifications
         SET status = 'in_progress', strategy = ?, started_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'pending'
       `).run(strategy, now, vid);
+      if (claim.changes === 0) {
+        // Someone else claimed it in the gap between our SELECT and our
+        // UPDATE — move on to the next candidate belief.
+        continue;
+      }
     } else {
       vid = randomUUID();
       db.prepare(`

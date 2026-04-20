@@ -706,7 +706,7 @@ describe('BRAIN-158: partial unique index on active verifications', () => {
 
   it('allows a new active verification after the first completes', () => {
     const v1 = createVerification(db, beliefId, 'manual');
-    recordVerification(db, v1!, 'confirmed', { notes: 'done' });
+    recordVerification(db, v1!, 'confirmed', [], 'done');
     // Now a new active one is allowed
     const v2 = createVerification(db, beliefId, 'manual');
     expect(v2).toBeDefined();
