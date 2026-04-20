@@ -345,6 +345,9 @@ export function checkObservation(
 /**
  * Record a contradiction against a belief.
  * Pushes to the contradictions array and auto-challenges at 2+ contradictions.
+ *
+ * Read + write are wrapped in a transaction so two concurrent contradictions
+ * can't lose each other by both reading the same pre-append state.
  */
 export function recordContradiction(
   db: Database.Database,
@@ -352,73 +355,83 @@ export function recordContradiction(
   observation: string,
   reason?: string,
 ): Belief | undefined {
-  const belief = getBelief(db, beliefId);
-  if (!belief) return undefined;
+  const txn = db.transaction((): string | undefined => {
+    const belief = getBelief(db, beliefId);
+    if (!belief) return undefined;
 
-  const newContradiction: Contradiction = {
-    observation,
-    reason: reason ?? 'manual',
-    recorded_at: new Date().toISOString(),
-  };
+    const newContradiction: Contradiction = {
+      observation,
+      reason: reason ?? 'manual',
+      recorded_at: new Date().toISOString(),
+    };
 
-  const updatedContradictions = [...belief.contradictions, newContradiction];
+    const updatedContradictions = [...belief.contradictions, newContradiction];
 
-  // Auto-challenge beliefs with 2+ contradictions
-  const newStatus = updatedContradictions.length >= 2 && belief.status === 'active'
-    ? 'challenged'
-    : belief.status;
+    // Auto-challenge beliefs with 2+ contradictions
+    const newStatus = updatedContradictions.length >= 2 && belief.status === 'active'
+      ? 'challenged'
+      : belief.status;
 
-  db.prepare(`
-    UPDATE beliefs
-    SET contradictions = ?,
-        status = ?
-    WHERE id = ?
-  `).run(
-    JSON.stringify(updatedContradictions),
-    newStatus,
-    belief.id,
-  );
+    db.prepare(`
+      UPDATE beliefs
+      SET contradictions = ?,
+          status = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify(updatedContradictions),
+      newStatus,
+      belief.id,
+    );
+    return belief.id;
+  });
 
-  return getBelief(db, belief.id);
+  const id = txn();
+  return id ? getBelief(db, id) : undefined;
 }
 
 /**
  * Confirm a belief — update last_confirmed and optionally add evidence.
  * If the belief was challenged, restore to active and boost confidence by 0.1.
+ *
+ * Transaction-wrapped so the read (status/evidence) and the write can't
+ * race against another confirm/revise on the same belief.
  */
 export function confirmBelief(
   db: Database.Database,
   beliefId: string,
   evidence?: string,
 ): Belief | undefined {
-  const belief = getBelief(db, beliefId);
-  if (!belief) return undefined;
+  const txn = db.transaction((): string | undefined => {
+    const belief = getBelief(db, beliefId);
+    if (!belief) return undefined;
 
-  const updatedEvidence = evidence
-    ? [...belief.evidence, evidence]
-    : belief.evidence;
+    const updatedEvidence = evidence
+      ? [...belief.evidence, evidence]
+      : belief.evidence;
 
-  // If challenged, restore to active and boost confidence
-  const newStatus = belief.status === 'challenged' ? 'active' : belief.status;
-  const newConfidence = belief.status === 'challenged'
-    ? Math.min(1.0, belief.confidence + 0.1)
-    : belief.confidence;
+    const newStatus = belief.status === 'challenged' ? 'active' : belief.status;
+    const newConfidence = belief.status === 'challenged'
+      ? Math.min(1.0, belief.confidence + 0.1)
+      : belief.confidence;
 
-  db.prepare(`
-    UPDATE beliefs
-    SET last_confirmed = datetime('now'),
-        evidence = ?,
-        status = ?,
-        confidence = ?
-    WHERE id = ?
-  `).run(
-    JSON.stringify(updatedEvidence),
-    newStatus,
-    newConfidence,
-    belief.id,
-  );
+    db.prepare(`
+      UPDATE beliefs
+      SET last_confirmed = datetime('now'),
+          evidence = ?,
+          status = ?,
+          confidence = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify(updatedEvidence),
+      newStatus,
+      newConfidence,
+      belief.id,
+    );
+    return belief.id;
+  });
 
-  return getBelief(db, belief.id);
+  const id = txn();
+  return id ? getBelief(db, id) : undefined;
 }
 
 /**
@@ -432,71 +445,80 @@ export function reviseBelief(
   reason: string,
   newConfidence?: number,
 ): Belief | undefined {
-  const belief = getBelief(db, beliefId);
-  if (!belief) return undefined;
+  const txn = db.transaction((): string | undefined => {
+    const belief = getBelief(db, beliefId);
+    if (!belief) return undefined;
 
-  const revision: RevisionEntry = {
-    previous_statement: belief.statement,
-    previous_confidence: belief.confidence,
-    reason,
-    revised_at: new Date().toISOString(),
-  };
+    const revision: RevisionEntry = {
+      previous_statement: belief.statement,
+      previous_confidence: belief.confidence,
+      reason,
+      revised_at: new Date().toISOString(),
+    };
 
-  const updatedHistory = [...belief.revision_history, revision];
-  const confidence = newConfidence !== undefined
-    ? Math.max(0, Math.min(1, newConfidence))
-    : belief.confidence;
+    const updatedHistory = [...belief.revision_history, revision];
+    const confidence = newConfidence !== undefined
+      ? Math.max(0, Math.min(1, newConfidence))
+      : belief.confidence;
 
-  db.prepare(`
-    UPDATE beliefs
-    SET statement = ?,
-        confidence = ?,
-        status = 'active',
-        last_confirmed = datetime('now'),
-        contradictions = '[]',
-        revision_history = ?
-    WHERE id = ?
-  `).run(
-    newStatement,
-    confidence,
-    JSON.stringify(updatedHistory),
-    belief.id,
-  );
+    db.prepare(`
+      UPDATE beliefs
+      SET statement = ?,
+          confidence = ?,
+          status = 'active',
+          last_confirmed = datetime('now'),
+          contradictions = '[]',
+          revision_history = ?
+      WHERE id = ?
+    `).run(
+      newStatement,
+      confidence,
+      JSON.stringify(updatedHistory),
+      belief.id,
+    );
+    return belief.id;
+  });
 
-  return getBelief(db, belief.id);
+  const id = txn();
+  return id ? getBelief(db, id) : undefined;
 }
 
 /**
  * Retire a belief — mark as no longer relevant.
+ * Transaction-wrapped to avoid losing a concurrent revision.
  */
 export function retireBelief(
   db: Database.Database,
   beliefId: string,
   reason: string,
 ): Belief | undefined {
-  const belief = getBelief(db, beliefId);
-  if (!belief) return undefined;
+  const txn = db.transaction((): string | undefined => {
+    const belief = getBelief(db, beliefId);
+    if (!belief) return undefined;
 
-  const revision: RevisionEntry = {
-    previous_statement: belief.statement,
-    previous_confidence: belief.confidence,
-    reason: `Retired: ${reason}`,
-    revised_at: new Date().toISOString(),
-  };
+    const revision: RevisionEntry = {
+      previous_statement: belief.statement,
+      previous_confidence: belief.confidence,
+      reason: `Retired: ${reason}`,
+      revised_at: new Date().toISOString(),
+    };
 
-  const updatedHistory = [...belief.revision_history, revision];
+    const updatedHistory = [...belief.revision_history, revision];
 
-  db.prepare(`
-    UPDATE beliefs
-    SET status = 'retired',
-        revision_history = ?
-    WHERE id = ?
-  `).run(
-    JSON.stringify(updatedHistory),
-    belief.id,
-  );
+    db.prepare(`
+      UPDATE beliefs
+      SET status = 'retired',
+          revision_history = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify(updatedHistory),
+      belief.id,
+    );
+    return belief.id;
+  });
 
-  return getBelief(db, belief.id);
+  const id = txn();
+  return id ? getBelief(db, id) : undefined;
 }
 
 /**

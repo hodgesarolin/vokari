@@ -152,8 +152,8 @@ tool(
     type: z.enum(['fact', 'pattern', 'policy', 'technical']).describe('Category: fact (wrong data), pattern (wrong behavior), policy (scope boundary), technical (implementation)'),
     content: z.string().describe('What to do differently (imperative form)'),
     root_cause: z.string().optional().describe('Why the error happened'),
-    example_bad: z.string().optional().describe('What was said wrong (DPO rejected)'),
-    example_good: z.string().optional().describe('What should have been said (DPO chosen)'),
+    example_bad: z.string().optional().describe('Example of the incorrect output (used for context retrieval when similar patterns recur)'),
+    example_good: z.string().optional().describe('Example of the correct output (used for context retrieval when similar patterns recur)'),
     permanence: z.enum(['never', 'conditional', 'graduable']).optional().describe('never = permanent, conditional = retire when verified, graduable = retire after streak'),
     source: z.string().optional().describe('Where this correction came from'),
   },
@@ -718,16 +718,21 @@ server.resource(
 // Unified Knowledge Store
 // ────────────────────────────────────────────
 
-const KNOWLEDGE_TYPES = [
+// Knowledge types: OPEN string per v2 spec. The underlying store accepts
+// any type — closing it here broke callers that write custom types
+// (e.g. 'note', 'session', 'ticket'). Documented known types for IDE
+// hints remain in the description; no runtime constraint.
+const KNOWN_KNOWLEDGE_TYPES = [
   'belief', 'correction', 'position', 'prediction', 'research',
-  'handoff', 'context', 'archive', 'digest',
-] as const;
+  'handoff', 'context', 'archive', 'digest', 'note',
+];
+const KNOWLEDGE_TYPE_HINT = `Content type. Known conventions: ${KNOWN_KNOWLEDGE_TYPES.join(', ')}. Any string is accepted.`;
 
 tool(
   'upsert_knowledge',
   'Add or update a knowledge entry. For mutable types (handoff, context), overwrites on type+key match. For other types, creates a new entry or updates existing on key match.',
   {
-    type: z.enum(KNOWLEDGE_TYPES).describe('Content type'),
+    type: z.string().min(1).describe(KNOWLEDGE_TYPE_HINT),
     key: z.string().describe('Unique key within type (e.g., "interactive-context", "family")'),
     content: z.string().describe('The content text'),
     metadata: z.record(z.string(), z.unknown()).optional().describe('Optional JSON metadata'),
@@ -754,7 +759,7 @@ tool(
   'get_knowledge',
   'Get a knowledge entry by type and key',
   {
-    type: z.enum(KNOWLEDGE_TYPES).describe('Content type'),
+    type: z.string().min(1).describe(KNOWLEDGE_TYPE_HINT),
     key: z.string().describe('Unique key within type'),
   },
   async (params) => {
@@ -774,7 +779,7 @@ tool(
   'Full-text search across all knowledge types. Uses FTS5 BM25 ranking.',
   {
     query: z.string().describe('Search terms'),
-    type: z.enum(KNOWLEDGE_TYPES).optional().describe('Filter by type'),
+    type: z.string().min(1).optional().describe(KNOWLEDGE_TYPE_HINT),
     limit: z.number().optional().default(10).describe('Max results'),
   },
   async (params) => {

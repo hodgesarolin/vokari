@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { resolveId } from './db.js';
+import { resolveId, runMigration } from './db.js';
 
 export type Domain = 'political' | 'technical' | 'behavioral' | 'market' | 'general';
 export type Outcome = 'correct' | 'incorrect' | 'partial' | 'voided';
@@ -119,14 +119,14 @@ function rowToPrediction(row: PredictionRow): Prediction {
 export function initPredictions(db: Database.Database): void {
   db.exec(SCHEMA);
   db.exec(INDEXES);
-
-  // Migration: add revision_history column to existing databases
-  try {
-    db.exec(`ALTER TABLE predictions ADD COLUMN revision_history TEXT DEFAULT '[]'`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : '';
-    if (!msg.includes('duplicate column') && !msg.includes('already exists')) throw err;
-  }
+  // Add revision_history column on older DBs. Routed through runMigration
+  // so it's recorded in _migrations and run at most once per DB (no more
+  // swallow-duplicate-column on every init call).
+  runMigration(
+    db,
+    'predictions_add_revision_history',
+    `ALTER TABLE predictions ADD COLUMN revision_history TEXT DEFAULT '[]'`,
+  );
 }
 
 export function addPrediction(db: Database.Database, input: AddPredictionInput): string {

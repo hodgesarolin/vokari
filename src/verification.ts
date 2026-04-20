@@ -16,7 +16,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import type { Belief } from './beliefs.js';
-import { resolveId, runMigration } from './db.js';
+import { resolveId, runMigration, now as sqliteNow } from './db.js';
 
 // ── Types ──
 
@@ -132,6 +132,46 @@ export function initVerifications(db: Database.Database): void {
     'verifications_drop_old_belief_index',
     'DROP INDEX IF EXISTS idx_verifications_belief',
   );
+  // Before adding the partial unique index, dedupe any existing duplicate
+  // active rows. Pre-fix DBs could accumulate multiple pending/in_progress
+  // verifications per belief (the bug we're fixing). If we tried CREATE
+  // UNIQUE INDEX straight away on such a DB, it would throw.
+  //
+  // Strategy: for each belief with multiple active rows, keep the most
+  // recently-created one active and mark the rest as 'skipped' (preserves
+  // history — we don't delete any row).
+  runMigration(
+    db,
+    'verifications_dedupe_active_before_unique_index',
+    `UPDATE verifications
+       SET status = 'skipped'
+     WHERE id IN (
+       SELECT id FROM (
+         SELECT id, belief_id, status, created_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY belief_id
+                  ORDER BY
+                    CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                    created_at DESC
+                ) AS rn
+         FROM verifications
+         WHERE status IN ('pending', 'in_progress')
+       )
+       WHERE rn > 1
+     )`,
+  );
+  // Partial unique index: only one ACTIVE (pending/in_progress) verification
+  // per belief. Closes a check-then-insert race in createVerification — two
+  // concurrent callers previously could both pass the "no existing active"
+  // check and then both INSERT. With this index the second INSERT fails
+  // with UNIQUE, and createVerification recovers by returning the existing row.
+  runMigration(
+    db,
+    'verifications_unique_active_per_belief',
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_verifications_active_unique
+       ON verifications(belief_id)
+       WHERE status IN ('pending', 'in_progress')`,
+  );
 }
 
 /**
@@ -143,25 +183,44 @@ export function createVerification(
   beliefId: string,
   strategy: VerificationStrategy = 'manual',
 ): string | undefined {
-  // Resolve the belief ID (supports prefix matching)
   const resolvedBeliefId = resolveId(db, 'beliefs', beliefId);
   if (!resolvedBeliefId) return undefined;
 
-  // Check for existing pending/in_progress verification for this belief
-  const existing = db.prepare(`
-    SELECT id FROM verifications
-    WHERE belief_id = ? AND status IN ('pending', 'in_progress')
-  `).get(resolvedBeliefId) as { id: string } | undefined;
+  // Atomic check-then-insert. Partial unique index on
+  // `verifications(belief_id) WHERE status IN ('pending','in_progress')`
+  // enforces at-most-one-active at the DB level, so a concurrent second
+  // caller either returns the existing ID or is caught by the UNIQUE
+  // constraint below and retries the SELECT.
+  const txn = db.transaction((): string => {
+    const existing = db.prepare(`
+      SELECT id FROM verifications
+      WHERE belief_id = ? AND status IN ('pending', 'in_progress')
+    `).get(resolvedBeliefId) as { id: string } | undefined;
+    if (existing) return existing.id;
 
-  if (existing) return existing.id;
+    const id = randomUUID();
+    try {
+      db.prepare(`
+        INSERT INTO verifications (id, belief_id, strategy)
+        VALUES (?, ?, ?)
+      `).run(id, resolvedBeliefId, strategy);
+      return id;
+    } catch (err: unknown) {
+      // UNIQUE violation from the partial index — another writer claimed
+      // the slot between our SELECT and our INSERT. Return theirs.
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('UNIQUE')) {
+        const raced = db.prepare(`
+          SELECT id FROM verifications
+          WHERE belief_id = ? AND status IN ('pending', 'in_progress')
+        `).get(resolvedBeliefId) as { id: string } | undefined;
+        if (raced) return raced.id;
+      }
+      throw err;
+    }
+  });
 
-  const id = randomUUID();
-  db.prepare(`
-    INSERT INTO verifications (id, belief_id, strategy)
-    VALUES (?, ?, ?)
-  `).run(id, resolvedBeliefId, strategy);
-
-  return id;
+  return txn();
 }
 
 /**
@@ -233,7 +292,7 @@ export function verificationTick(
     contradictions: string;
   }>;
 
-  const now = new Date().toISOString();
+  const now = sqliteNow();
   const claimStmt = db.prepare(`
     UPDATE verifications SET status = 'in_progress', started_at = ? WHERE id = ?
   `);
@@ -367,7 +426,7 @@ export function recordVerification(
   const verification = getVerification(db, verificationId);
   if (!verification) return undefined;
 
-  const now = new Date().toISOString();
+  const now = sqliteNow();
 
   // Wrap both updates in a transaction so verification + belief stay consistent
   const txn = db.transaction(() => {
@@ -416,7 +475,7 @@ export function skipVerification(
 ): void {
   const resolved = resolveId(db, 'verifications', verificationId);
   if (!resolved) return;
-  const now = new Date().toISOString();
+  const now = sqliteNow();
   db.prepare(`
     UPDATE verifications
     SET status = 'skipped',
@@ -450,9 +509,12 @@ export function opportunisticVerification(
   // Get IDs of beliefs with active verifications or recently verified
   const excludeIds = new Set<string>();
 
-  // Only exclude beliefs with active (in_progress) verifications.
-  // Pending verifications (from create_verification or stale reclaims) are
-  // handled by verificationTick, not opportunistic — don't block re-selection.
+  // Exclude only beliefs with an in_progress verification — someone is
+  // already reviewing them. Beliefs with a PENDING verification (either
+  // from createVerification or reclaimed from stale in_progress) are
+  // still candidates; we promote the pending row to in_progress in place
+  // instead of INSERTing a new one (which would violate the partial
+  // unique index).
   const active = db.prepare(`
     SELECT DISTINCT belief_id FROM verifications
     WHERE status = 'in_progress'
@@ -499,13 +561,43 @@ export function opportunisticVerification(
       strategy = 'staleness';
     }
 
-    // Create a verification record (claimed immediately)
-    const vid = randomUUID();
-    const now = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO verifications (id, belief_id, strategy, status, started_at)
-      VALUES (?, ?, ?, 'in_progress', ?)
-    `).run(vid, belief.id, strategy, now);
+    // If a pending verification already exists for this belief (from
+    // createVerification or a reclaimed stale row), promote it to
+    // in_progress rather than INSERTing a new row (the partial unique
+    // index would reject that).
+    const now = sqliteNow();
+    const existingPending = db.prepare(`
+      SELECT id FROM verifications
+      WHERE belief_id = ? AND status = 'pending'
+      ORDER BY created_at ASC
+      LIMIT 1
+    `).get(belief.id) as { id: string } | undefined;
+
+    // Claim the pending row CONDITIONALLY so two concurrent hosts can't
+    // both win. `AND status = 'pending'` + changes check gives us the
+    // atomic claim semantics the unique index can't reach (since both
+    // rows already share belief_id, the index is indifferent to which
+    // host wins — we need to decide).
+    let vid: string;
+    if (existingPending) {
+      vid = existingPending.id;
+      const claim = db.prepare(`
+        UPDATE verifications
+        SET status = 'in_progress', strategy = ?, started_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(strategy, now, vid);
+      if (claim.changes === 0) {
+        // Someone else claimed it in the gap between our SELECT and our
+        // UPDATE — move on to the next candidate belief.
+        continue;
+      }
+    } else {
+      vid = randomUUID();
+      db.prepare(`
+        INSERT INTO verifications (id, belief_id, strategy, status, started_at)
+        VALUES (?, ?, ?, 'in_progress', ?)
+      `).run(vid, belief.id, strategy, now);
+    }
 
     return {
       beliefId: belief.id,
@@ -586,9 +678,12 @@ export function verificationStatus(db: Database.Database): VerificationStats {
     WHERE status = 'completed' AND started_at IS NOT NULL
   `).get() as { avg_hours: number | null };
 
-  // Oldest unverified belief
+  // Oldest unverified belief — "oldest" means MAX age-in-days, not MIN.
+  // Previously used MIN which returned the NEWEST unverified belief, giving
+  // a misleading "oldest is 0.2 days" in the dashboard for stores with any
+  // recent unverified write.
   const oldestUnverified = db.prepare(`
-    SELECT MIN(
+    SELECT MAX(
       julianday('now') - julianday(COALESCE(last_confirmed, first_recorded))
     ) as days
     FROM beliefs
