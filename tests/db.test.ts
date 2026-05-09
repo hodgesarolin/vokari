@@ -261,11 +261,22 @@ describe('resolveId', () => {
     expect(resolveId(db, 'corrections', 'aaaaaaaa')).toBeUndefined();
   });
 
-  it('does not prefix-match when input contains hyphens', () => {
+  it('prefix-matches truncated IDs even with hyphens', () => {
     const id = addCorrection(db, { type: 'fact', content: 'Test' });
-    // A partial UUID with hyphens should only match exactly
+    // A partial UUID with hyphens should still prefix-match if unique
     const partial = id.slice(0, 13); // e.g. 'xxxxxxxx-xxxx'
-    expect(resolveId(db, 'corrections', partial)).toBeUndefined();
+    expect(resolveId(db, 'corrections', partial)).toBe(id);
+  });
+
+  it('prefix-matches custom non-UUID IDs with hyphens', () => {
+    // Simulate the ghost prediction bug: non-UUID IDs with hyphens
+    db.prepare(`INSERT INTO corrections (id, type, content) VALUES (?, 'fact', 'Custom')`).run('waiver-1776223725445');
+    expect(resolveId(db, 'corrections', 'waiver-1')).toBe('waiver-1776223725445');
+  });
+
+  it('does not prefix-match full-length UUIDs', () => {
+    // A 36-char string that doesn't match should return undefined, not prefix-search
+    expect(resolveId(db, 'corrections', 'zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz')).toBeUndefined();
   });
 
   it('works with getCorrection for prefix lookup', () => {
