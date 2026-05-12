@@ -151,6 +151,38 @@ export function graduateCorrection(db: Database.Database, id: string): void {
   `).run(resolved);
 }
 
+export interface UpdateCorrectionInput {
+  content?: string;
+  root_cause?: string | null;
+  example_bad?: string | null;
+  example_good?: string | null;
+  source?: string | null;
+  type?: CorrectionType;
+  permanence?: Permanence;
+}
+
+export function updateCorrection(db: Database.Database, id: string, input: UpdateCorrectionInput): Correction | undefined {
+  const resolved = resolveId(db, 'corrections', id);
+  if (!resolved) return undefined;
+
+  const updates: string[] = [];
+  const params: unknown[] = [];
+
+  if (input.content !== undefined) { updates.push('content = ?'); params.push(input.content); }
+  if (input.root_cause !== undefined) { updates.push('root_cause = ?'); params.push(input.root_cause); }
+  if (input.example_bad !== undefined) { updates.push('example_bad = ?'); params.push(input.example_bad); }
+  if (input.example_good !== undefined) { updates.push('example_good = ?'); params.push(input.example_good); }
+  if (input.source !== undefined) { updates.push('source = ?'); params.push(input.source); }
+  if (input.type !== undefined) { updates.push('type = ?'); params.push(input.type); }
+  if (input.permanence !== undefined) { updates.push('permanence = ?'); params.push(input.permanence); }
+
+  if (updates.length === 0) return getCorrection(db, resolved);
+
+  params.push(resolved);
+  db.prepare(`UPDATE corrections SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  return getCorrection(db, resolved);
+}
+
 export function deleteCorrection(db: Database.Database, id: string): void {
   const resolved = resolveId(db, 'corrections', id);
   if (!resolved) return;

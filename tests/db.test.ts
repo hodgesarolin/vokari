@@ -13,6 +13,7 @@ import {
   recordViolation,
   graduateCorrection,
   deleteCorrection,
+  updateCorrection,
   getContext,
   getStats,
 } from '../src/corrections.js';
@@ -309,6 +310,91 @@ describe('resolveId', () => {
     const prefix = id.slice(0, 8);
     deleteCorrection(db, prefix);
     expect(getCorrection(db, id)).toBeUndefined();
+  });
+});
+
+describe('updateCorrection', () => {
+  it('updates content field', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Original content' });
+    const updated = updateCorrection(db, id, { content: 'Updated content' });
+    expect(updated).toBeDefined();
+    expect(updated!.content).toBe('Updated content');
+  });
+
+  it('updates example_good and example_bad', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Test correction' });
+    const updated = updateCorrection(db, id, {
+      example_bad: 'Wrong way',
+      example_good: 'Right way',
+    });
+    expect(updated!.example_bad).toBe('Wrong way');
+    expect(updated!.example_good).toBe('Right way');
+  });
+
+  it('updates root_cause and source', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Test' });
+    const updated = updateCorrection(db, id, {
+      root_cause: 'Pattern completion',
+      source: 'Daniel, May 11',
+    });
+    expect(updated!.root_cause).toBe('Pattern completion');
+    expect(updated!.source).toBe('Daniel, May 11');
+  });
+
+  it('updates type and permanence', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Test', permanence: 'conditional' });
+    const updated = updateCorrection(db, id, { type: 'pattern', permanence: 'never' });
+    expect(updated!.type).toBe('pattern');
+    expect(updated!.permanence).toBe('never');
+  });
+
+  it('clears nullable fields with null', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'Test', root_cause: 'Some cause' });
+    const updated = updateCorrection(db, id, { root_cause: null });
+    expect(updated!.root_cause).toBeNull();
+  });
+
+  it('returns undefined for non-existent id', () => {
+    const result = updateCorrection(db, 'nonexistent-id-12345', { content: 'Nope' });
+    expect(result).toBeUndefined();
+  });
+
+  it('works with prefix id', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Prefix update test' });
+    const prefix = id.slice(0, 8);
+    const updated = updateCorrection(db, prefix, { content: 'Updated via prefix' });
+    expect(updated).toBeDefined();
+    expect(updated!.content).toBe('Updated via prefix');
+    expect(updated!.id).toBe(id);
+  });
+
+  it('preserves fields not included in update', () => {
+    const id = addCorrection(db, {
+      type: 'fact', content: 'Original', root_cause: 'Root',
+      example_bad: 'Bad', example_good: 'Good', source: 'Test',
+    });
+    const updated = updateCorrection(db, id, { content: 'Changed' });
+    expect(updated!.content).toBe('Changed');
+    expect(updated!.root_cause).toBe('Root');
+    expect(updated!.example_bad).toBe('Bad');
+    expect(updated!.example_good).toBe('Good');
+    expect(updated!.source).toBe('Test');
+  });
+
+  it('does not modify violation_count or streak_days', () => {
+    const id = addCorrection(db, { type: 'pattern', content: 'Test' });
+    recordViolation(db, id);
+    const before = getCorrection(db, id)!;
+    expect(before.violation_count).toBe(1);
+    const updated = updateCorrection(db, id, { content: 'Updated' });
+    expect(updated!.violation_count).toBe(1); // preserved
+    expect(updated!.streak_days).toBe(0); // preserved from violation reset
+  });
+
+  it('returns correction unchanged when no fields provided', () => {
+    const id = addCorrection(db, { type: 'fact', content: 'No-op test' });
+    const updated = updateCorrection(db, id, {});
+    expect(updated!.content).toBe('No-op test');
   });
 });
 
