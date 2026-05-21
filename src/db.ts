@@ -25,8 +25,8 @@ export function resolveId(db: Database.Database, table: string, id: string): str
   const exact = db.prepare(`SELECT id FROM "${table}" WHERE id = ?`).get(id) as { id: string } | undefined;
   if (exact) return exact.id;
 
-  // Prefix match: only if input looks truncated (no hyphens = likely prefix)
-  if (!id.includes('-')) {
+  // Prefix match: only if input looks truncated (shorter than a full UUID)
+  if (id.length < 36) {
     const rows = db.prepare(`SELECT id FROM "${table}" WHERE id LIKE ? LIMIT 2`).all(`${id}%`) as { id: string }[];
     if (rows.length === 1) return rows[0].id;
   }

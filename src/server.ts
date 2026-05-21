@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { initDb } from './db.js';
 import {
-  addCorrection, getCorrection, listCorrections,
+  addCorrection, getCorrection, listCorrections, updateCorrection,
   searchCorrections, recordViolation, graduateCorrection, getContext, getStats,
 } from './corrections.js';
 import {
@@ -240,6 +240,30 @@ tool(
       `Total violations: ${s.total_violations}`,
     ].join('\n');
     return { content: [{ type: 'text' as const, text }] };
+  },
+);
+
+tool(
+  'update_correction',
+  'Update fields on an existing correction. Use for populating example_good, fixing typos, updating root_cause, etc. Does NOT allow changing violation_count, streak_days, or graduated_at (those have business logic — use record_violation or graduate_correction instead).',
+  {
+    id: z.string().describe('Correction ID (full UUID or prefix)'),
+    content: z.string().optional().describe('Updated correction text (imperative form)'),
+    root_cause: z.string().optional().describe('Updated root cause'),
+    example_bad: z.string().optional().describe('Updated example of incorrect output'),
+    example_good: z.string().optional().describe('Updated example of correct output'),
+    source: z.string().optional().describe('Updated source attribution'),
+    type: z.enum(['fact', 'pattern', 'policy', 'technical']).optional().describe('Updated correction type'),
+    permanence: z.enum(['never', 'conditional', 'graduable']).optional().describe('Updated permanence level'),
+  },
+  async (params) => {
+    const { id, ...updates } = params;
+    const correction = updateCorrection(db, id, updates);
+    if (!correction) return { content: [{ type: 'text' as const, text: `Correction not found: ${id}` }] };
+    const fields = Object.keys(updates).filter(k => updates[k as keyof typeof updates] !== undefined);
+    return {
+      content: [{ type: 'text' as const, text: `Updated correction ${correction.id.slice(0, 8)}:\n  Fields: ${fields.join(', ')}\n  Content: ${correction.content}\n  Example good: ${correction.example_good || '(none)'}` }],
+    };
   },
 );
 
