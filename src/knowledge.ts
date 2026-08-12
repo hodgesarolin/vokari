@@ -18,6 +18,7 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { initProposals } from './proposals.js';
 
 // ── Types ──
 
@@ -186,6 +187,9 @@ const KNOWLEDGE_SCHEMA = `
  */
 export function initKnowledge(db: Database.Database): void {
   db.exec(KNOWLEDGE_SCHEMA);
+
+  // Provenance columns + the partial unique index that makes append-only possible.
+  initProposals(db);
 
   // FTS5 virtual table — external content mode.
   // Note: knowledge.id is a TEXT UUID, but FTS5 content_rowid uses SQLite's
@@ -383,9 +387,14 @@ export function updateKnowledge(
 
 /**
  * Upsert: for mutable types (handoff, context), overwrite on type+key match.
- * For immutable types, creates a new row.
+ * For immutable types, appends a new row and supersedes the previous one.
  *
- * Returns the ID of the upserted row.
+ * DEPRECATED in favour of `proposeMemoryWrite`. This path carries no provenance, so rows it
+ * writes are labelled `origin = 'legacy'` — truthful, and trust 0, so any real proposal
+ * supersedes them. Kept working because it is live: local models reach it through the
+ * `upsert_knowledge` MCP tool, and Brain's daily digests arrive this way.
+ *
+ * Returns the ID of the current row after the operation.
  */
 export function upsertKnowledge(
   db: Database.Database,
@@ -401,13 +410,34 @@ export function upsertKnowledge(
     ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
 
     if (existing) {
-      // Update existing row
+      // Mutable rows genuinely overwrite: handoff and context are workflow/projection state,
+      // not durable knowledge, and their history is noise.
+      if (existing.mutable === 1) {
+        db.prepare(`
+          UPDATE knowledge
+          SET content = ?, metadata = ?, updated_at = ?
+          WHERE id = ?
+        `).run(input.content, metadataStr, now, existing.id);
+        return existing.id;
+      }
+
+      // Immutable rows append and supersede — which is what this function's docblock has always
+      // claimed. Until 2026-08-12 the code selected `mutable` and then updated regardless, so
+      // every type was overwritten destructively: 86 rows with mutable = 0 in the live store had
+      // already lost their prior content, including 7 corrections.
+      //
+      // Order matters. The partial unique index permits one CURRENT row per (type, key), so the
+      // incumbent must be marked superseded BEFORE the replacement is inserted, or the insert
+      // trips the constraint inside the transaction.
+      const newId = randomUUID();
+      db.prepare('UPDATE knowledge SET superseded_by = ?, updated_at = ? WHERE id = ?')
+        .run(newId, now, existing.id);
       db.prepare(`
-        UPDATE knowledge
-        SET content = ?, metadata = ?, updated_at = ?
-        WHERE id = ?
-      `).run(input.content, metadataStr, now, existing.id);
-      return existing.id;
+        INSERT INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable, origin, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'legacy', ?)
+      `).run(newId, input.type, input.key, input.content, metadataStr, now, now,
+             `upsert_knowledge:supersedes:${existing.id}`);
+      return newId;
     }
 
     // Create new row
@@ -477,6 +507,14 @@ export function searchKnowledge(
     FROM knowledge_fts
     JOIN knowledge k ON knowledge_fts.rowid = k.rowid
     WHERE knowledge_fts MATCH ?
+      -- Search resolves through the projection, like every other read. Superseded rows stay in
+      -- the FTS index (the triggers index every row, and history is the point of keeping them),
+      -- so without this a key's old content keeps surfacing alongside its replacement — the
+      -- append-only fix would have quietly turned search into a source of stale answers.
+      -- Quarantined rows are excluded for the stronger reason: they may carry instructions a
+      -- model merely quoted, and search is exactly how that would reach a prompt.
+      AND k.superseded_by IS NULL
+      AND k.quarantined = 0
   `;
   const params: (string | number)[] = [sanitized];
 

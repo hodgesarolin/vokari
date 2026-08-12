@@ -160,6 +160,25 @@ export {
   OrderBy,
 } from './knowledge.js';
 
+// Memory proposals — the adjudicated write path (append-only, conflict detection).
+export {
+  initProposals,
+  proposeMemoryWrite,
+  currentKnowledge,
+  knowledgeHistory,
+  writeRatesByType,
+} from './proposals.js';
+export type {
+  Origin,
+  Classification,
+  Volatility,
+  ProposalStatus,
+  MemoryProposal,
+  Conflict,
+  Decision,
+} from './proposals.js';
+
+
 export type {
   Knowledge,
   KnowledgeType,
