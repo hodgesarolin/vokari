@@ -405,8 +405,15 @@ export function upsertKnowledge(
     const metadataStr = JSON.stringify(input.metadata ?? {});
 
     // Try to find existing row by type + key
+    // `superseded_by IS NULL` is load-bearing, not defensive. Once this function started
+    // appending, several rows share (type, key), and an unfiltered lookup returns the OLDEST —
+    // so the second supersession of a key would re-point an already-superseded row (breaking
+    // the history chain) and then insert a third current row, tripping idx_knowledge_current.
+    // Every key written more than twice would throw, and this is the live path for the
+    // `upsert_knowledge` MCP tool and the daily digests. Caught by CodeRabbit on vokari#13;
+    // the original tests each upserted a key once and never reached it.
     const existing = db.prepare(
-      'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ?'
+      'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL'
     ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
 
     if (existing) {

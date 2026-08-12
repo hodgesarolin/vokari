@@ -212,6 +212,13 @@ function validate(p: MemoryProposal): string | null {
   }
 
   if (typeof p.content !== 'string' || !p.content.trim()) return 'content is required';
+
+  // An empty string is falsy in JS but NOT NULL in SQL, so incumbent lookup skips it while the
+  // partial index still treats it as a key — the second empty-key proposal collided and threw
+  // a SqliteError out of a function that is documented to return a Decision for every outcome.
+  if (p.key !== undefined && (typeof p.key !== 'string' || !p.key.trim())) {
+    return 'key must be a non-empty string when provided';
+  }
   if (!p.source || typeof p.source !== 'string') return 'source is required for provenance';
   if (!ORIGINS.has(p.origin)) return `origin must be one of ${[...ORIGINS].join(', ')}`;
 
@@ -275,6 +282,22 @@ export function proposeMemoryWrite(db: Database.Database, p: MemoryProposal): De
           conflicts: [],
         };
       }
+
+      // The explicit target must hold the key this row will occupy. Otherwise the named row is
+      // superseded, the row actually holding the key stays current, and the insert collides
+      // with it — the caller's mistake surfacing as a raw SqliteError.
+      if (p.key) {
+        const holder = db.prepare(
+          'SELECT id FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL',
+        ).get(p.type, p.key) as { id: string } | undefined;
+        if (holder && holder.id !== incumbent.id) {
+          return {
+            status: 'rejected',
+            reason: `supersedes target ${p.supersedes} does not hold the current row for ${p.type}/${p.key}`,
+            conflicts: [],
+          };
+        }
+      }
     } else if (p.key) {
       incumbent = db.prepare(
         'SELECT id, content, origin, updated_at FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL',
@@ -298,6 +321,21 @@ export function proposeMemoryWrite(db: Database.Database, p: MemoryProposal): De
         if (!quarantined) return {
           status: 'needs_approval',
           reason: 'the current row was stated by the owner; a machine proposal cannot supersede it without approval',
+          conflicts,
+        };
+      }
+
+      // An incumbent whose origin is outside the vocabulary cannot be ranked, so it is not
+      // auto-superseded. `TRUST[unknown]` is undefined and `n < undefined` is false, which let
+      // the gate pass silently — a proposal committed straight over a row it could not compare
+      // itself to. Defaulting the unknown side to 0 does not fix that: every valid proposal
+      // origin is >= 1, so the comparison stays false and the write still lands. The only
+      // fail-closed answer is to stop.
+      if (!(existingOrigin in TRUST)) {
+        conflicts.push({ ...base, reason: 'lower_trust_than_incumbent' });
+        if (!quarantined) return {
+          status: 'needs_approval',
+          reason: `the current row's origin '${existingOrigin}' is not a known trust tier, so it cannot be ranked against '${p.origin}'`,
           conflicts,
         };
       }

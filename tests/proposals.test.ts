@@ -253,3 +253,76 @@ describe('search reads the projection', () => {
     expect(searchKnowledge(db, 'instructions')).toHaveLength(0);
   });
 });
+
+// Regressions from the CodeRabbit review of vokari#13. Each of these threw a raw SqliteError
+// out of a path documented to return a Decision, or silently committed where it should have
+// stopped. The original tests missed them by exercising each key at most twice.
+describe('regressions', () => {
+  it('an immutable key can be upserted repeatedly — the third write no longer throws', () => {
+    // Unfiltered incumbent lookup returned the OLDEST row once several shared (type, key), so
+    // it re-pointed an already-superseded row and inserted a second current one.
+    addKnowledge(db, { type: 'note', key: 'k', content: 'v1', mutable: false });
+    expect(() => {
+      upsertKnowledge(db, { type: 'note', key: 'k', content: 'v2' });
+      upsertKnowledge(db, { type: 'note', key: 'k', content: 'v3' });
+      upsertKnowledge(db, { type: 'note', key: 'k', content: 'v4' });
+    }).not.toThrow();
+
+    expect(knowledgeHistory(db, 'note', 'k')).toHaveLength(4);
+    expect(currentKnowledge(db, 'note', 'k')?.content).toBe('v4');
+
+    const current = db.prepare(
+      'SELECT COUNT(*) c FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL',
+    ).get('note', 'k') as { c: number };
+    expect(current.c).toBe(1);
+  });
+
+  it('the supersession chain stays intact across repeated writes', () => {
+    // Each row must point at the one that replaced it; a broken link loses the history the
+    // append-only path exists to keep.
+    addKnowledge(db, { type: 'note', key: 'chain', content: 'v1', mutable: false });
+    upsertKnowledge(db, { type: 'note', key: 'chain', content: 'v2' });
+    upsertKnowledge(db, { type: 'note', key: 'chain', content: 'v3' });
+
+    const rows = db.prepare(
+      'SELECT id, content, superseded_by FROM knowledge WHERE type = ? AND key = ? ORDER BY created_at',
+    ).all('note', 'chain') as { id: string; content: string; superseded_by: string | null }[];
+
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const v1 = rows.find((r) => r.content === 'v1')!;
+    expect(byId.get(v1.superseded_by!)?.content).toBe('v2');
+    expect(rows.filter((r) => r.superseded_by === null)).toHaveLength(1);
+  });
+
+  it('rejects an empty key instead of throwing on the second one', () => {
+    // '' is falsy in JS but NOT NULL in SQL: incumbent lookup skipped it while the partial
+    // index indexed it, so the second such proposal collided.
+    expect(proposeMemoryWrite(db, valid({ key: '' })).status).toBe('rejected');
+    expect(proposeMemoryWrite(db, valid({ key: '   ' })).status).toBe('rejected');
+    expect(() => proposeMemoryWrite(db, valid({ key: '' }))).not.toThrow();
+  });
+
+  it('rejects a supersedes target that does not hold the key being written', () => {
+    const x = proposeMemoryWrite(db, valid({ key: 'kx', content: 'X' }));
+    proposeMemoryWrite(db, valid({ key: 'ky', content: 'Y' }));
+
+    const d = proposeMemoryWrite(db, valid({ key: 'ky', content: 'Z', supersedes: x.row_id }));
+    expect(d.status).toBe('rejected');
+    // Both rows survive untouched — the caller's mistake changed nothing.
+    expect(currentKnowledge(db, 'belief', 'kx')?.content).toBe('X');
+    expect(currentKnowledge(db, 'belief', 'ky')?.content).toBe('Y');
+  });
+
+  it('will not auto-supersede an incumbent whose origin it cannot rank', () => {
+    // Brain still writes this database directly, and quarantine graduation will add tiers, so
+    // an unrecognised origin is reachable. `TRUST[unknown]` is undefined and `3 < undefined` is
+    // false, so the gate passed and the proposal committed over a row it could not compare
+    // itself to. Note a `?? 0` default does NOT close this: every valid proposal origin is >= 1,
+    // so the comparison stays false and the write still lands.
+    db.prepare("INSERT INTO knowledge (id, type, key, content, origin) VALUES ('X', 'belief', 'k1', 'incumbent', 'graduated')").run();
+
+    const d = proposeMemoryWrite(db, valid({ origin: 'brain', content: 'overwrote it' }));
+    expect(d.status).toBe('needs_approval');
+    expect(currentKnowledge(db, 'belief', 'k1')?.content).toBe('incumbent');
+  });
+});
