@@ -408,7 +408,13 @@ export function proposeMemoryWrite(db: Database.Database, p: MemoryProposal): De
     };
   });
 
-  return txn();
+  // IMMEDIATE, not the deferred default. `db.transaction(fn)` issues plain BEGIN, so the write
+  // lock is not taken until the first write — two writers racing on one (type, key) would both
+  // resolve "no incumbent" and both INSERT, and the partial unique index correctly rejects the
+  // loser. That is reachable across PROCESSES here, not just within one: Brain writes this same
+  // database directly through lib/vokari-client.mjs. With IMMEDIATE the loser blocks at BEGIN,
+  // then re-reads and finds the winner's row.
+  return txn.immediate();
 }
 
 // ── Projection ──
@@ -445,7 +451,7 @@ export function knowledgeHistory(
     FROM knowledge
     WHERE type = ? AND (key = ? OR json_extract(metadata, '$.pending_key') = ?)
     ORDER BY created_at DESC
-  `).all(type, key, key) as never;
+  `).all(type, key, key) as { id: string; content: string; origin: Origin; source: string | null; created_at: string; superseded_by: string | null }[];
 }
 
 /**
@@ -469,5 +475,5 @@ export function writeRatesByType(
     FROM knowledge
     GROUP BY type
     ORDER BY days_since DESC
-  `).all() as never;
+  `).all() as { type: string; total: number; last_write: string; days_since: number }[];
 }

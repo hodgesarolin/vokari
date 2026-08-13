@@ -459,7 +459,9 @@ export function upsertKnowledge(
 
     return id;
   });
-  return txn();
+  // IMMEDIATE for the same reason as proposeMemoryWrite: this SELECTs an incumbent and then
+  // writes against the partial unique index, and the default BEGIN is deferred.
+  return txn.immediate();
 }
 
 /**
