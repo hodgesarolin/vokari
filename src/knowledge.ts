@@ -282,8 +282,11 @@ export function getKnowledgeByKey(
   type: KnowledgeType,
   key: string,
 ): Knowledge | undefined {
+  // The projection, not "any row with this key". Once history exists, several rows share
+  // (type, key) and an unfiltered lookup returns the oldest — so the MCP `get_knowledge` tool
+  // would hand a model the superseded version of a fact. Use knowledgeHistory() for history.
   const row = db.prepare(
-    'SELECT * FROM knowledge WHERE type = ? AND key = ?'
+    'SELECT * FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL AND quarantined = 0'
   ).get(type, key) as KnowledgeRow | undefined;
   return row ? rowToKnowledge(row) : undefined;
 }
@@ -302,6 +305,8 @@ export interface ListKnowledgeOpts {
  */
 export interface ListKnowledgeInternalOpts extends ListKnowledgeOpts {
   metadataFilter?: MetadataFilter;
+  /** Include superseded and quarantined rows. Off by default — see the query below. */
+  includeSuperseded?: boolean;
 }
 
 /**
@@ -326,7 +331,12 @@ export function listKnowledgeInternal(
   db: Database.Database,
   opts?: ListKnowledgeInternalOpts,
 ): Knowledge[] {
-  let sql = 'SELECT * FROM knowledge WHERE 1=1';
+  // Current rows only unless a caller explicitly asks for history. Listing superseded rows by
+  // default would make every consumer — the CLI, the MCP list tool, imports — show stale
+  // content beside current content with nothing to distinguish them.
+  let sql = opts?.includeSuperseded
+    ? 'SELECT * FROM knowledge WHERE 1=1'
+    : 'SELECT * FROM knowledge WHERE superseded_by IS NULL AND quarantined = 0';
   const params: unknown[] = [];
 
   if (opts?.type) {
