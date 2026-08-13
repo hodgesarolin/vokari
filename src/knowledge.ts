@@ -152,9 +152,14 @@ export interface KnowledgeSearchResult extends Knowledge {
 
 
 export interface KnowledgeStats {
+  /** Current rows only — see getKnowledgeStats for why this excludes history. */
   total: number;
   byType: { type: string; count: number }[];
   mutableCount: number;
+  /** Rows replaced by a newer version. Retained, not counted in `total`. */
+  superseded: number;
+  /** Rows held pending acknowledgement. Retained, not counted in `total`. */
+  quarantined: number;
 }
 
 // ── Schema ──
@@ -572,13 +577,23 @@ export function searchKnowledge(
  * Get knowledge store statistics.
  */
 export function getKnowledgeStats(db: Database.Database): KnowledgeStats {
-  const total = (db.prepare('SELECT COUNT(*) as c FROM knowledge').get() as { c: number }).c;
+  // Counts describe what the store currently HOLDS, not how many rows have ever existed.
+  //
+  // Before append-only these were the same number. Now every supersession leaves its
+  // predecessor behind, so an unfiltered COUNT(*) answers "how many writes have there ever
+  // been" while reading as "how much do you know" — and it drifts further from the truth every
+  // day. `superseded` is reported separately so the history is visible rather than folded into
+  // a total that no longer means what its name says.
+  const CURRENT = 'superseded_by IS NULL AND quarantined = 0';
+  const total = (db.prepare(`SELECT COUNT(*) as c FROM knowledge WHERE ${CURRENT}`).get() as { c: number }).c;
   const byType = db.prepare(
-    'SELECT type, COUNT(*) as count FROM knowledge GROUP BY type ORDER BY count DESC'
+    `SELECT type, COUNT(*) as count FROM knowledge WHERE ${CURRENT} GROUP BY type ORDER BY count DESC`
   ).all() as { type: string; count: number }[];
-  const mutableCount = (db.prepare('SELECT COUNT(*) as c FROM knowledge WHERE mutable = 1').get() as { c: number }).c;
+  const mutableCount = (db.prepare(`SELECT COUNT(*) as c FROM knowledge WHERE mutable = 1 AND ${CURRENT}`).get() as { c: number }).c;
+  const superseded = (db.prepare('SELECT COUNT(*) as c FROM knowledge WHERE superseded_by IS NOT NULL').get() as { c: number }).c;
+  const quarantined = (db.prepare('SELECT COUNT(*) as c FROM knowledge WHERE quarantined = 1').get() as { c: number }).c;
 
-  return { total, byType, mutableCount };
+  return { total, byType, mutableCount, superseded, quarantined };
 }
 
 // ── Migration Helpers ──
