@@ -18,6 +18,7 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { initProposals } from './proposals.js';
 
 // ── Types ──
 
@@ -151,9 +152,14 @@ export interface KnowledgeSearchResult extends Knowledge {
 
 
 export interface KnowledgeStats {
+  /** Current rows only — see getKnowledgeStats for why this excludes history. */
   total: number;
   byType: { type: string; count: number }[];
   mutableCount: number;
+  /** Rows replaced by a newer version. Retained, not counted in `total`. */
+  superseded: number;
+  /** Rows held pending acknowledgement. Retained, not counted in `total`. */
+  quarantined: number;
 }
 
 // ── Schema ──
@@ -186,6 +192,9 @@ const KNOWLEDGE_SCHEMA = `
  */
 export function initKnowledge(db: Database.Database): void {
   db.exec(KNOWLEDGE_SCHEMA);
+
+  // Provenance columns + the partial unique index that makes append-only possible.
+  initProposals(db);
 
   // FTS5 virtual table — external content mode.
   // Note: knowledge.id is a TEXT UUID, but FTS5 content_rowid uses SQLite's
@@ -278,8 +287,11 @@ export function getKnowledgeByKey(
   type: KnowledgeType,
   key: string,
 ): Knowledge | undefined {
+  // The projection, not "any row with this key". Once history exists, several rows share
+  // (type, key) and an unfiltered lookup returns the oldest — so the MCP `get_knowledge` tool
+  // would hand a model the superseded version of a fact. Use knowledgeHistory() for history.
   const row = db.prepare(
-    'SELECT * FROM knowledge WHERE type = ? AND key = ?'
+    'SELECT * FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL AND quarantined = 0'
   ).get(type, key) as KnowledgeRow | undefined;
   return row ? rowToKnowledge(row) : undefined;
 }
@@ -298,6 +310,8 @@ export interface ListKnowledgeOpts {
  */
 export interface ListKnowledgeInternalOpts extends ListKnowledgeOpts {
   metadataFilter?: MetadataFilter;
+  /** Include superseded and quarantined rows. Off by default — see the query below. */
+  includeSuperseded?: boolean;
 }
 
 /**
@@ -322,7 +336,12 @@ export function listKnowledgeInternal(
   db: Database.Database,
   opts?: ListKnowledgeInternalOpts,
 ): Knowledge[] {
-  let sql = 'SELECT * FROM knowledge WHERE 1=1';
+  // Current rows only unless a caller explicitly asks for history. Listing superseded rows by
+  // default would make every consumer — the CLI, the MCP list tool, imports — show stale
+  // content beside current content with nothing to distinguish them.
+  let sql = opts?.includeSuperseded
+    ? 'SELECT * FROM knowledge WHERE 1=1'
+    : 'SELECT * FROM knowledge WHERE superseded_by IS NULL AND quarantined = 0';
   const params: unknown[] = [];
 
   if (opts?.type) {
@@ -383,9 +402,14 @@ export function updateKnowledge(
 
 /**
  * Upsert: for mutable types (handoff, context), overwrite on type+key match.
- * For immutable types, creates a new row.
+ * For immutable types, appends a new row and supersedes the previous one.
  *
- * Returns the ID of the upserted row.
+ * DEPRECATED in favour of `proposeMemoryWrite`. This path carries no provenance, so rows it
+ * writes are labelled `origin = 'legacy'` — truthful, and trust 0, so any real proposal
+ * supersedes them. Kept working because it is live: local models reach it through the
+ * `upsert_knowledge` MCP tool, and Brain's daily digests arrive this way.
+ *
+ * Returns the ID of the current row after the operation.
  */
 export function upsertKnowledge(
   db: Database.Database,
@@ -396,18 +420,46 @@ export function upsertKnowledge(
     const metadataStr = JSON.stringify(input.metadata ?? {});
 
     // Try to find existing row by type + key
+    // `superseded_by IS NULL` is load-bearing, not defensive. Once this function started
+    // appending, several rows share (type, key), and an unfiltered lookup returns the OLDEST —
+    // so the second supersession of a key would re-point an already-superseded row (breaking
+    // the history chain) and then insert a third current row, tripping idx_knowledge_current.
+    // Every key written more than twice would throw, and this is the live path for the
+    // `upsert_knowledge` MCP tool and the daily digests. Caught by CodeRabbit on vokari#13;
+    // the original tests each upserted a key once and never reached it.
     const existing = db.prepare(
-      'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ?'
+      'SELECT id, mutable FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL'
     ).get(input.type, input.key) as { id: string; mutable: number } | undefined;
 
     if (existing) {
-      // Update existing row
+      // Mutable rows genuinely overwrite: handoff and context are workflow/projection state,
+      // not durable knowledge, and their history is noise.
+      if (existing.mutable === 1) {
+        db.prepare(`
+          UPDATE knowledge
+          SET content = ?, metadata = ?, updated_at = ?
+          WHERE id = ?
+        `).run(input.content, metadataStr, now, existing.id);
+        return existing.id;
+      }
+
+      // Immutable rows append and supersede — which is what this function's docblock has always
+      // claimed. Until 2026-08-12 the code selected `mutable` and then updated regardless, so
+      // every type was overwritten destructively: 86 rows with mutable = 0 in the live store had
+      // already lost their prior content, including 7 corrections.
+      //
+      // Order matters. The partial unique index permits one CURRENT row per (type, key), so the
+      // incumbent must be marked superseded BEFORE the replacement is inserted, or the insert
+      // trips the constraint inside the transaction.
+      const newId = randomUUID();
+      db.prepare('UPDATE knowledge SET superseded_by = ?, updated_at = ? WHERE id = ?')
+        .run(newId, now, existing.id);
       db.prepare(`
-        UPDATE knowledge
-        SET content = ?, metadata = ?, updated_at = ?
-        WHERE id = ?
-      `).run(input.content, metadataStr, now, existing.id);
-      return existing.id;
+        INSERT INTO knowledge (id, type, key, content, metadata, created_at, updated_at, mutable, origin, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'legacy', ?)
+      `).run(newId, input.type, input.key, input.content, metadataStr, now, now,
+             `upsert_knowledge:supersedes:${existing.id}`);
+      return newId;
     }
 
     // Create new row
@@ -422,7 +474,9 @@ export function upsertKnowledge(
 
     return id;
   });
-  return txn();
+  // IMMEDIATE for the same reason as proposeMemoryWrite: this SELECTs an incumbent and then
+  // writes against the partial unique index, and the default BEGIN is deferred.
+  return txn.immediate();
 }
 
 /**
@@ -477,6 +531,14 @@ export function searchKnowledge(
     FROM knowledge_fts
     JOIN knowledge k ON knowledge_fts.rowid = k.rowid
     WHERE knowledge_fts MATCH ?
+      -- Search resolves through the projection, like every other read. Superseded rows stay in
+      -- the FTS index (the triggers index every row, and history is the point of keeping them),
+      -- so without this a key's old content keeps surfacing alongside its replacement — the
+      -- append-only fix would have quietly turned search into a source of stale answers.
+      -- Quarantined rows are excluded for the stronger reason: they may carry instructions a
+      -- model merely quoted, and search is exactly how that would reach a prompt.
+      AND k.superseded_by IS NULL
+      AND k.quarantined = 0
   `;
   const params: (string | number)[] = [sanitized];
 
@@ -515,13 +577,23 @@ export function searchKnowledge(
  * Get knowledge store statistics.
  */
 export function getKnowledgeStats(db: Database.Database): KnowledgeStats {
-  const total = (db.prepare('SELECT COUNT(*) as c FROM knowledge').get() as { c: number }).c;
+  // Counts describe what the store currently HOLDS, not how many rows have ever existed.
+  //
+  // Before append-only these were the same number. Now every supersession leaves its
+  // predecessor behind, so an unfiltered COUNT(*) answers "how many writes have there ever
+  // been" while reading as "how much do you know" — and it drifts further from the truth every
+  // day. `superseded` is reported separately so the history is visible rather than folded into
+  // a total that no longer means what its name says.
+  const CURRENT = 'superseded_by IS NULL AND quarantined = 0';
+  const total = (db.prepare(`SELECT COUNT(*) as c FROM knowledge WHERE ${CURRENT}`).get() as { c: number }).c;
   const byType = db.prepare(
-    'SELECT type, COUNT(*) as count FROM knowledge GROUP BY type ORDER BY count DESC'
+    `SELECT type, COUNT(*) as count FROM knowledge WHERE ${CURRENT} GROUP BY type ORDER BY count DESC`
   ).all() as { type: string; count: number }[];
-  const mutableCount = (db.prepare('SELECT COUNT(*) as c FROM knowledge WHERE mutable = 1').get() as { c: number }).c;
+  const mutableCount = (db.prepare(`SELECT COUNT(*) as c FROM knowledge WHERE mutable = 1 AND ${CURRENT}`).get() as { c: number }).c;
+  const superseded = (db.prepare('SELECT COUNT(*) as c FROM knowledge WHERE superseded_by IS NOT NULL').get() as { c: number }).c;
+  const quarantined = (db.prepare('SELECT COUNT(*) as c FROM knowledge WHERE quarantined = 1').get() as { c: number }).c;
 
-  return { total, byType, mutableCount };
+  return { total, byType, mutableCount, superseded, quarantined };
 }
 
 // ── Migration Helpers ──

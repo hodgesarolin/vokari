@@ -4,3 +4,9 @@ dist/
 *.db-shm
 *.db-wal
 .DS_Store
+
+# Database snapshots and backups. `*.db` does not cover these — a suffixed copy like
+# `epistemic.db.backup-2026-07-27` matches no rule above, so nine full copies of the personal
+# knowledge store sat untracked-but-committable in a repo that pushes to GitHub.
+*.db.*
+*.db-*

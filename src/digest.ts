@@ -82,10 +82,13 @@ export function compileDigest(
   };
 
   // Query all knowledge entries updated since the cutoff
+  // Current rows only. Superseding an incumbent WRITES to it — `UPDATE knowledge SET
+  // superseded_by = ?, updated_at = ?` — so every replaced row lands inside this window and the
+  // digest would report each change twice: once as the new content, once as the row it retired.
   const rows = db.prepare(`
     SELECT id, type, key, content, metadata, updated_at
     FROM knowledge
-    WHERE updated_at > ?
+    WHERE updated_at > ? AND superseded_by IS NULL AND quarantined = 0
     ORDER BY type, updated_at DESC
   `).all(since) as ChangeRow[];
 
