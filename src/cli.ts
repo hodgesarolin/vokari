@@ -137,7 +137,6 @@ function parseCorrections(markdown: string): ParsedCorrection[] {
 
 if (command === 'init') {
   const db = initDb(dbPath);
-  initKnowledge(db);
   console.log(`Initialized Vokari database at ${dbPath}`);
   console.log(`Tables: corrections, beliefs, predictions, positions, verifications, knowledge`);
   db.close();
@@ -157,7 +156,6 @@ if (command === 'init') {
     // JSON backup import
     const data = JSON.parse(content);
     const db = initDb(dbPath);
-    initKnowledge(db);
 
     const counts = { corrections: 0, beliefs: 0, predictions: 0, positions: 0, knowledge: 0 };
 
@@ -249,7 +247,6 @@ if (command === 'init') {
 
 } else if (command === 'export') {
   const db = initDb(dbPath);
-  initKnowledge(db);
 
   const data = {
     exported_at: new Date().toISOString(),
@@ -343,7 +340,6 @@ if (command === 'init') {
     const port = parseInt(getArg('--port') ?? '3838', 10);
     const host = getArg('--host') ?? '127.0.0.1';
     const db = initDb(dbPath);
-    initKnowledge(db);
     startDashboard(db, port, host);
   }
 

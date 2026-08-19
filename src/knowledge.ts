@@ -176,8 +176,18 @@ const KNOWLEDGE_SCHEMA = `
     mutable INTEGER DEFAULT 0
   );
 
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_type_key
-    ON knowledge(type, key) WHERE key IS NOT NULL;
+  -- NOTE: the old UNIQUE(type, key) WHERE key IS NOT NULL index is deliberately NOT created
+  -- here. initProposals(), called by initKnowledge, drops it and installs the
+  -- partial form that also requires superseded_by IS NULL, which is what makes history
+  -- representable.
+  --
+  -- Recreating it here was a live outage. This exec runs BEFORE initProposals, so on any
+  -- database that had already accumulated history the CREATE threw
+  -- "UNIQUE constraint failed: knowledge.type, knowledge.key" and initKnowledge never reached
+  -- the drop. IF NOT EXISTS does not save it: the migration had already removed the index, so
+  -- SQLite genuinely tried to create it and hit the duplicate. Every Vokari MCP server start
+  -- crashed from the first supersession onward, so Brain lost its memory tools entirely, while
+  -- the library path -- which never re-runs this -- kept working and hid the outage.
 
   CREATE INDEX IF NOT EXISTS idx_knowledge_type
     ON knowledge(type);
@@ -193,12 +203,6 @@ const KNOWLEDGE_SCHEMA = `
 export function initKnowledge(db: Database.Database): void {
   db.exec(KNOWLEDGE_SCHEMA);
 
-  // Provenance columns + the partial unique index that makes append-only possible.
-  initProposals(db);
-
-  // FTS5 virtual table — external content mode.
-  // Note: knowledge.id is a TEXT UUID, but FTS5 content_rowid uses SQLite's
-  // implicit integer rowid. Hybrid search must JOIN on rowid, not id.
   const ftsExists = db.prepare(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
   ).get();
@@ -215,24 +219,71 @@ export function initKnowledge(db: Database.Database): void {
         tokenize='porter unicode61'
       );
 
-      CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge BEGIN
-        INSERT INTO knowledge_fts(rowid, content, type, key, metadata)
-          VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
-      END;
-
-      CREATE TRIGGER knowledge_ad AFTER DELETE ON knowledge BEGIN
-        INSERT INTO knowledge_fts(knowledge_fts, rowid, content, type, key, metadata)
-          VALUES ('delete', old.rowid, old.content, old.type, old.key, old.metadata);
-      END;
-
-      CREATE TRIGGER knowledge_au AFTER UPDATE ON knowledge BEGIN
-        INSERT INTO knowledge_fts(knowledge_fts, rowid, content, type, key, metadata)
-          VALUES ('delete', old.rowid, old.content, old.type, old.key, old.metadata);
-        INSERT INTO knowledge_fts(rowid, content, type, key, metadata)
-          VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
-      END;
     `);
   }
+
+  // Triggers are ensured on EVERY init, not only when the table is created.
+  //
+  // They used to live inside the `if (!ftsExists)` block, which left "FTS table present,
+  // triggers absent" permanently unrepaired — reachable by a crash between the statements of the
+  // non-atomic exec above, or by an operator dropping the triggers. In that state the startup
+  // rebuild makes search look correct for an instant and then every subsequent write silently
+  // bypasses the index, so search rots with nothing reporting it. Verified: after initDb on such
+  // a database, triggers stayed at 0 and a write was invisible to MATCH.
+  //
+  // They are all IF NOT EXISTS, so running them unconditionally is free.
+  db.exec(`
+      CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+        INSERT INTO knowledge_fts(rowid, content, type, key, metadata)
+          VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+        INSERT INTO knowledge_fts(knowledge_fts, rowid, content, type, key, metadata)
+          VALUES ('delete', old.rowid, old.content, old.type, old.key, old.metadata);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
+        INSERT INTO knowledge_fts(knowledge_fts, rowid, content, type, key, metadata)
+          VALUES ('delete', old.rowid, old.content, old.type, old.key, old.metadata);
+        INSERT INTO knowledge_fts(rowid, content, type, key, metadata)
+          VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
+      END;
+  `);
+
+  // Rebuild the FTS index on every init, unconditionally.
+  //
+  // The backfill above sits inside `if (!ftsExists)`, so it only ever helps a database whose FTS
+  // table is created from that moment on. A store where an OLDER version built the index over a
+  // populated table keeps a silently empty index forever: `ftsExists` is true on every subsequent
+  // boot, the block is skipped, search returns nothing, and the first UPDATE fires the trigger's
+  // FTS 'delete' for a row that was never indexed — "database disk image is malformed". Preventing
+  // the disease in new cases is not the same as curing it, and this repo carries several stores
+  // (epistemic-qwen.db, epistemic-claude.db, backups) that could already be in that state.
+  //
+  // A count comparison CANNOT detect this, which a test caught after the first attempt shipped
+  // one: `SELECT COUNT(*) FROM knowledge_fts` on an external-content table delegates to the
+  // CONTENT table, so it returns the `knowledge` row count no matter how empty the index is. The
+  // check compared knowledge against knowledge and could never fire. There is no cheap honest
+  // staleness probe, so rebuild rather than guess.
+  //
+  // Measured on the live store: 81-93ms for 1092 rows, once per process start. That is a fair
+  // price for "search cannot be silently dead", and it self-heals any already-broken store with
+  // no per-store diagnosis.
+  const rowCount = (db.prepare('SELECT COUNT(*) AS c FROM knowledge').get() as { c: number }).c;
+  if (rowCount > 0) {
+    db.exec("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');");
+  }
+
+  // Provenance columns + the partial unique index that makes append-only possible.
+  //
+  // MUST run after the FTS table exists. initProposals issues
+  // `UPDATE knowledge SET origin = 'legacy' WHERE origin IS NULL`, and the FTS triggers fire on
+  // every UPDATE. If knowledge_fts is missing while its triggers remain — the state left by the
+  // standard repair for a corrupt index, DROP TABLE knowledge_fts — that UPDATE throws
+  // "no such table: main.knowledge_fts" and startup dies. Recreating the table first makes the
+  // repair work by simply restarting, which is the whole point of the repair.
+  initProposals(db);
 }
 
 // ── Helpers ──

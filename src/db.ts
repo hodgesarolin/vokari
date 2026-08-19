@@ -103,6 +103,12 @@ export function runMigration(
 export function initDb(path: string): Database.Database {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
+  // Brain writes this same file from another process with `busy_timeout = 5000`, while this side
+  // set no timeout at all — so a concurrent write during init made startup throw SQLITE_BUSY
+  // rather than wait. The unconditional FTS rebuild widened that window from milliseconds to
+  // ~90ms, creating a new crash in exactly the class this change set out to remove. Matching
+  // Brain's 5s makes the two sides agree on what contention means.
+  db.pragma('busy_timeout = 5000');
   initCorrections(db);
   initBeliefs(db);
   initPredictions(db);

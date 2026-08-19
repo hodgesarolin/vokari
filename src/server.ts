@@ -36,8 +36,10 @@ import type { VerificationOutcome, VerificationStrategy } from './verification.j
 import { compileDigest } from './digest.js';
 
 const dbPath = process.env.EPISTEMIC_DB || './epistemic.db';
+// initDb already calls initKnowledge (db.ts). Calling it again re-ran the whole init — which was
+// harmless while it was all IF NOT EXISTS no-ops, and is not now that it rebuilds the FTS index:
+// it doubled both the cost and the write-lock window on every server start.
 const db = initDb(dbPath);
-initKnowledge(db);
 
 const server = new McpServer({
   name: 'vokari',
