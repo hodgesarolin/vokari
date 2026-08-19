@@ -242,6 +242,23 @@ export function initKnowledge(db: Database.Database): void {
           VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
       END;
     `);
+
+    // Backfill, if the table already had rows when the index was created.
+    //
+    // This is an external-content FTS5 table: it does not hold the text, it holds an index that
+    // is ASSUMED to mirror `knowledge`. Creating it over a populated table produces an index
+    // that is silently empty but believed complete. Search returns nothing, which merely looks
+    // like no matches — and worse, the first UPDATE fires the trigger above, which issues an
+    // FTS 'delete' for a row that was never indexed. That corrupts the index outright:
+    // "database disk image is malformed" on an ordinary supersession.
+    //
+    // Reached whenever `knowledge` predates the FTS table — an older database, or a table
+    // restored from a backup. Found by tests/reinit.test.ts, not in production, because the
+    // live store's FTS index predates the append-only migration and is populated.
+    const existingRows = (db.prepare('SELECT COUNT(*) AS c FROM knowledge').get() as { c: number }).c;
+    if (existingRows > 0) {
+      db.exec("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');");
+    }
   }
 }
 
