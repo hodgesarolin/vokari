@@ -176,8 +176,18 @@ const KNOWLEDGE_SCHEMA = `
     mutable INTEGER DEFAULT 0
   );
 
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_type_key
-    ON knowledge(type, key) WHERE key IS NOT NULL;
+  -- NOTE: the old UNIQUE(type, key) WHERE key IS NOT NULL index is deliberately NOT created
+  -- here. initProposals(), called immediately below by initKnowledge, drops it and installs the
+  -- partial form that also requires superseded_by IS NULL, which is what makes history
+  -- representable.
+  --
+  -- Recreating it here was a live outage. This exec runs BEFORE initProposals, so on any
+  -- database that had already accumulated history the CREATE threw
+  -- "UNIQUE constraint failed: knowledge.type, knowledge.key" and initKnowledge never reached
+  -- the drop. IF NOT EXISTS does not save it: the migration had already removed the index, so
+  -- SQLite genuinely tried to create it and hit the duplicate. Every Vokari MCP server start
+  -- crashed from the first supersession onward, so Brain lost its memory tools entirely, while
+  -- the library path -- which never re-runs this -- kept working and hid the outage.
 
   CREATE INDEX IF NOT EXISTS idx_knowledge_type
     ON knowledge(type);
