@@ -390,10 +390,9 @@ if (process.argv[1]?.endsWith('dashboard.ts') || process.argv[1]?.endsWith('dash
   const dbPath = dbIdx >= 0 ? args[dbIdx + 1] : process.env.EPISTEMIC_DB ?? './epistemic.db';
 
   const { initDb } = await import('./db.js');
-  const { initKnowledge } = await import('./knowledge.js');
 
+  // initDb already calls initKnowledge; calling it again now costs a second FTS rebuild.
   const db = initDb(dbPath);
-  initKnowledge(db);
 
   startDashboard(db, port);
 }
