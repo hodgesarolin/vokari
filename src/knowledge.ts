@@ -177,7 +177,7 @@ const KNOWLEDGE_SCHEMA = `
   );
 
   -- NOTE: the old UNIQUE(type, key) WHERE key IS NOT NULL index is deliberately NOT created
-  -- here. initProposals(), called immediately below by initKnowledge, drops it and installs the
+  -- here. initProposals(), called by initKnowledge, drops it and installs the
   -- partial form that also requires superseded_by IS NULL, which is what makes history
   -- representable.
   --
@@ -219,6 +219,20 @@ export function initKnowledge(db: Database.Database): void {
         tokenize='porter unicode61'
       );
 
+    `);
+  }
+
+  // Triggers are ensured on EVERY init, not only when the table is created.
+  //
+  // They used to live inside the `if (!ftsExists)` block, which left "FTS table present,
+  // triggers absent" permanently unrepaired — reachable by a crash between the statements of the
+  // non-atomic exec above, or by an operator dropping the triggers. In that state the startup
+  // rebuild makes search look correct for an instant and then every subsequent write silently
+  // bypasses the index, so search rots with nothing reporting it. Verified: after initDb on such
+  // a database, triggers stayed at 0 and a write was invisible to MATCH.
+  //
+  // They are all IF NOT EXISTS, so running them unconditionally is free.
+  db.exec(`
       CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
         INSERT INTO knowledge_fts(rowid, content, type, key, metadata)
           VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
@@ -235,21 +249,7 @@ export function initKnowledge(db: Database.Database): void {
         INSERT INTO knowledge_fts(rowid, content, type, key, metadata)
           VALUES (new.rowid, new.content, new.type, new.key, new.metadata);
       END;
-    `);
-
-    // Backfill, if the table already had rows when the index was created.
-    //
-    // This is an external-content FTS5 table: it does not hold the text, it holds an index that
-    // is ASSUMED to mirror `knowledge`. Creating it over a populated table produces an index
-    // that is silently empty but believed complete. Search returns nothing, which merely looks
-    // like no matches — and worse, the first UPDATE fires the trigger above, which issues an
-    // FTS 'delete' for a row that was never indexed. That corrupts the index outright:
-    // "database disk image is malformed" on an ordinary supersession.
-    //
-    // Reached whenever `knowledge` predates the FTS table — an older database, or a table
-    // restored from a backup. Found by tests/reinit.test.ts, not in production, because the
-    // live store's FTS index predates the append-only migration and is populated.
-  }
+  `);
 
   // Rebuild the FTS index on every init, unconditionally.
   //

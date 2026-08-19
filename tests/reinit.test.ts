@@ -308,12 +308,31 @@ describe('an FTS index that is ALREADY stale', () => {
     db.close();
   });
 
-  it('and the corruption landmine is defused, not merely unexploded', () => {
+  it('restores the missing triggers, so later writes stay indexed', () => {
+    // The assertion that was actually missing. `staleIndex()` builds "FTS table present, triggers
+    // absent" — and triggers used to be created only when the TABLE was absent, so that state was
+    // never repaired. The startup rebuild made search look correct for one instant and every
+    // subsequent write then silently bypassed the index.
+    //
+    // The previous version of this test asserted only that a write did not throw, which passed
+    // against the unfixed code too: with no triggers, nothing fires, so nothing can throw. That
+    // is the never-fails shape, and it is why this test now checks the triggers and the index
+    // contents rather than the absence of an exception.
     staleIndex();
     const db = initDb(dbPath);
-    expect(() => proposeMemoryWrite(db, proposal({ type: 'research', key: 'ka', content: 'revised' })))
-      .not.toThrow();
-    expect(() => db.exec("INSERT INTO knowledge_fts(knowledge_fts) VALUES('integrity-check');")).not.toThrow();
+
+    const triggers = (db.prepare(
+      "SELECT COUNT(*) c FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'knowledge'",
+    ).get() as { c: number }).c;
+    expect(triggers).toBe(3);
+
+    proposeMemoryWrite(db, proposal({ type: 'research', key: 'ka', content: 'revised aardvark' }));
+
+    // The real proof: a write made AFTER the repair is findable. Without triggers this is 0.
+    const hits = db.prepare(
+      "SELECT COUNT(*) c FROM knowledge_fts WHERE knowledge_fts MATCH 'aardvark'",
+    ).get() as { c: number };
+    expect(hits.c).toBe(1);
     db.close();
   });
 
