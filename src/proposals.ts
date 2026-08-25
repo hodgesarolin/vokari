@@ -82,6 +82,15 @@ const TRUST: Record<Origin, number> = {
 const QUARANTINE_ORIGINS: ReadonlySet<Origin> = new Set<Origin>(['distilled', 'external']);
 
 /**
+ * Capability marker for callers that MUST NOT run without the policy parameter.
+ * Default parameters do not count toward Function.length, so arity cannot
+ * detect support — and a caller passing a policy to an older build would be
+ * silently ignored, turning a strict quarantine regime into direct commits.
+ * Brain refuses to submit proposals unless this export is present.
+ */
+export const SUPPORTS_PROPOSAL_POLICY = true;
+
+/**
  * Types a proposal may never write — the sink allowlist, inverted.
  *
  * `context` holds what Brain is TOLD IT IS: the personal-context projection assembled into
