@@ -164,6 +164,10 @@ export {
 export {
   initProposals,
   proposeMemoryWrite,
+  approveProposal,
+  rejectProposal,
+  SUPPORTS_PROPOSAL_POLICY,
+  SUPPORTS_ADJUDICATION,
   currentKnowledge,
   knowledgeHistory,
   writeRatesByType,
@@ -174,8 +178,10 @@ export type {
   Volatility,
   ProposalStatus,
   MemoryProposal,
+  ProposalPolicy,
   Conflict,
   Decision,
+  AdjudicationResult,
 } from './proposals.js';
 
 
