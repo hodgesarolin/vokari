@@ -7,6 +7,7 @@ import {
   knowledgeHistory,
   writeRatesByType,
   type MemoryProposal,
+  type Origin,
 } from '../src/proposals.js';
 
 let db: Database.Database;
@@ -189,6 +190,32 @@ describe('quarantine', () => {
   it('a rejected proposal leaves nothing behind for a later read to find', () => {
     proposeMemoryWrite(db, valid({ topics: [] }));
     expect(db.prepare('SELECT COUNT(*) c FROM knowledge').get()).toEqual({ c: 0 });
+  });
+});
+
+describe('caller-supplied quarantine policy', () => {
+  // The store adjudicates mechanics; WHO may commit unreviewed is the caller's
+  // policy. Brain's launch regime quarantines every machine origin including
+  // 'brain', with exemption earned per-writer — so the set must be per-call.
+  it('quarantines origin brain when the caller says so', () => {
+    const d = proposeMemoryWrite(db, valid(), { quarantineOrigins: ['brain', 'distilled', 'external'] });
+    expect(d.status).toBe('quarantined');
+    expect(currentKnowledge(db, 'belief', 'k1')).toBeUndefined();
+  });
+
+  it('accepts a Set as well as an array', () => {
+    const d = proposeMemoryWrite(db, valid(), { quarantineOrigins: new Set<Origin>(['brain']) });
+    expect(d.status).toBe('quarantined');
+  });
+
+  it('an explicit policy fully replaces the default — the caller owns the consequences', () => {
+    const d = proposeMemoryWrite(db, valid({ origin: 'external', content: 'from a web page' }), { quarantineOrigins: ['brain'] });
+    expect(d.status).toBe('committed');
+  });
+
+  it('omitting the policy keeps the built-in default exactly', () => {
+    expect(proposeMemoryWrite(db, valid(), {}).status).toBe('committed');
+    expect(proposeMemoryWrite(db, valid({ origin: 'distilled', key: 'k-d' })).status).toBe('quarantined');
   });
 });
 

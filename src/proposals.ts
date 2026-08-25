@@ -249,13 +249,35 @@ function validate(p: MemoryProposal): string | null {
 
 // ── Adjudication ──
 
+/** Caller-supplied adjudication policy. Everything omitted keeps the built-in default. */
+export interface ProposalPolicy {
+  /**
+   * Origins held for review instead of committing. Defaults to QUARANTINE_ORIGINS
+   * ({distilled, external}). A caller enforcing a stricter regime — Brain's launch
+   * policy quarantines EVERY machine origin including 'brain', with exemption
+   * earned per-writer by measured accepted-rate — passes its own set per call.
+   * The policy belongs to the caller: this store adjudicates mechanics
+   * (conflicts, trust, supersession); who is trusted to commit unreviewed is a
+   * policy-layer decision that will vary per actor over time.
+   */
+  quarantineOrigins?: ReadonlySet<Origin> | readonly Origin[];
+}
+
 /**
  * Submit a proposal. Nothing is ever replaced: a commit inserts a new immutable row and marks
  * the row it replaced with `superseded_by`.
  */
-export function proposeMemoryWrite(db: Database.Database, p: MemoryProposal): Decision {
+export function proposeMemoryWrite(
+  db: Database.Database,
+  p: MemoryProposal,
+  policy: ProposalPolicy = {},
+): Decision {
   const rejection = validate(p);
   if (rejection) return { status: 'rejected', reason: rejection, conflicts: [] };
+
+  const quarantineOrigins: ReadonlySet<Origin> = policy.quarantineOrigins
+    ? new Set(policy.quarantineOrigins)
+    : QUARANTINE_ORIGINS;
 
   const txn = db.transaction((): Decision => {
     const ts = now();
@@ -266,7 +288,7 @@ export function proposeMemoryWrite(db: Database.Database, p: MemoryProposal): De
     // proposal for a NEW key was quarantined, while one for an EXISTING key came back as
     // needs_approval — implying an owner could approve it into place without ever
     // acknowledging that it came from outside.
-    const quarantined = QUARANTINE_ORIGINS.has(p.origin);
+    const quarantined = quarantineOrigins.has(p.origin);
 
     // The incumbent: the current row for this key, if any. Explicit `supersedes` wins over key
     // matching so a caller can target a specific row.
