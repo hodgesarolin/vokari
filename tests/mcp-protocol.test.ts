@@ -188,20 +188,58 @@ describe('MCP protocol — context assembly round-trip', () => {
 });
 
 describe('MCP protocol — knowledge round-trip', () => {
-  it('upsert_knowledge → search_knowledge returns it', async () => {
+  it('an OPERATIONAL type (handoff) still writes directly and round-trips via search', async () => {
     await client.callTool({
+      name: 'upsert_knowledge',
+      arguments: {
+        type: 'handoff',
+        key: 'integration-test-handoff',
+        content: 'operational state retrievable via FTS5',
+      },
+    });
+    const search = await client.callTool({
+      name: 'search_knowledge',
+      arguments: { query: 'operational' },
+    });
+    const text = (search.content as Array<{ type: string; text: string }>)[0].text;
+    expect(text).toContain('integration-test-handoff');
+  });
+
+  it('an EPISTEMIC type quarantines: acknowledged as held, invisible to search until approved', async () => {
+    // The old assertion here — upsert a 'note', find it in search — is now the
+    // exact behavior this server must NOT have: a machine write reaching the
+    // projection without adjudication (JARVIS Phase 1).
+    const up = await client.callTool({
       name: 'upsert_knowledge',
       arguments: {
         type: 'note',
         key: 'integration-test-note',
         content: 'retrievable via FTS5',
+        topics: ['infra'],
       },
     });
+    const upText = (up.content as Array<{ type: string; text: string }>)[0].text;
+    expect(upText).toContain('QUARANTINED pending owner review');
+
     const search = await client.callTool({
       name: 'search_knowledge',
       arguments: { query: 'retrievable' },
     });
     const text = (search.content as Array<{ type: string; text: string }>)[0].text;
-    expect(text).toContain('integration-test-note');
+    expect(text).not.toContain('integration-test-note');
+  });
+
+  it('an epistemic write without topics is rejected with the reason surfaced', async () => {
+    const up = await client.callTool({
+      name: 'upsert_knowledge',
+      arguments: {
+        type: 'note',
+        key: 'integration-test-untagged',
+        content: 'no topics supplied',
+      },
+    });
+    const upText = (up.content as Array<{ type: string; text: string }>)[0].text;
+    expect(upText).toMatch(/rejected/i);
+    expect(upText).toMatch(/topics/i);
   });
 });

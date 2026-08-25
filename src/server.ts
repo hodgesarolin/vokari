@@ -12,6 +12,8 @@ import {
   searchKnowledge, getKnowledgeStats,
 } from './knowledge.js';
 import type { KnowledgeType } from './knowledge.js';
+import { initProposals, proposeMemoryWrite } from './proposals.js';
+import type { Origin } from './proposals.js';
 import { assembleContext } from './compiler.js';
 import {
   addBelief, getBelief, listBeliefs, checkObservation,
@@ -756,28 +758,65 @@ const KNOWLEDGE_TYPE_HINT = `Content type. Known conventions: ${KNOWN_KNOWLEDGE_
 
 tool(
   'upsert_knowledge',
-  'Add or update a knowledge entry. For mutable types (handoff, context), overwrites on type+key match. For other types, creates a new entry or updates existing on key match.',
+  'Add or update a knowledge entry. OPERATIONAL types (context, handoff, config, instruction) write directly — they are working state, not facts. EVERY OTHER type becomes an adjudicated memory proposal: it is QUARANTINED pending owner review, requires non-empty `topics`, and your own later reads will not see it until approved. This is the intended behavior, not an error — do not retry.',
   {
     type: z.string().min(1).describe(KNOWLEDGE_TYPE_HINT),
     key: z.string().describe('Unique key within type (e.g., "interactive-context", "family")'),
     content: z.string().describe('The content text'),
     metadata: z.record(z.string(), z.unknown()).optional().describe('Optional JSON metadata'),
+    topics: z.array(z.string()).optional().describe('REQUIRED for non-operational types: topic tags from the owner\'s controlled vocabulary. A proposal without topics is rejected (topic-scoped retrieval cannot see an untagged row).'),
+    classification: z.string().optional().describe('public|internal|personal|sensitive (default internal). Secrets are refused outright — they belong in the secret store.'),
+    confidence: z.number().min(0).max(1).optional().describe('0..1 (default 0.7)'),
   },
   async (params) => {
-    const id = upsertKnowledge(db, {
-      type: params.type as KnowledgeType,
+    // The operational/epistemic split (JARVIS Phase 1, decided 2026-08-25). Operational
+    // working state — session handoffs, the context projection, config/instruction keys —
+    // keeps the direct path: quarantining a handoff stalls the session that wrote it, and
+    // proposals refuse DENIED_TYPES anyway. Everything else is durable knowledge about the
+    // owner and goes through adjudication. 'handoff' is the one addition to the proposal
+    // layer's own denied set: not a prompt-injection sink, but operational all the same.
+    const OPERATIONAL_TYPES = new Set(['context', 'handoff', 'config', 'instruction']);
+    if (OPERATIONAL_TYPES.has(params.type)) {
+      const id = upsertKnowledge(db, {
+        type: params.type as KnowledgeType,
+        key: params.key,
+        content: params.content,
+        metadata: params.metadata as Record<string, unknown>,
+      });
+      const k = id ? getKnowledge(db, id) : null;
+      const preview = k?.content?.slice(0, 200) ?? '';
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Knowledge upserted: ${id?.slice(0, 8) ?? 'unknown'} (${k?.type}/${k?.key})\nMutable: ${k?.mutable}\nContent: ${preview}${(k?.content?.length ?? 0) > 200 ? '...' : ''}`,
+        }],
+      };
+    }
+
+    // Epistemic write → adjudicated proposal. Origin is 'brain': every MCP caller is a
+    // model-driven Brain session or cron; 'owner' is reserved for the owner's own review
+    // surface. The quarantine set is the owner's launch policy (all machine origins held,
+    // exemption earned per-writer later) — mirrors Brain's BRAIN_QUARANTINE_ORIGINS.
+    initProposals(db);
+    const decision = proposeMemoryWrite(db, {
+      type: params.type,
       key: params.key,
       content: params.content,
+      source: 'mcp:upsert_knowledge',
+      origin: 'brain',
+      confidence: params.confidence ?? 0.7,
+      classification: (params.classification ?? 'internal') as never,
+      volatility: 'slow',
+      topics: params.topics ?? [],
       metadata: params.metadata as Record<string, unknown>,
-    });
-    const k = id ? getKnowledge(db, id) : null;
-    const preview = k?.content?.slice(0, 200) ?? '';
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `Knowledge upserted: ${id?.slice(0, 8) ?? 'unknown'} (${k?.type}/${k?.key})\nMutable: ${k?.mutable}\nContent: ${preview}${(k?.content?.length ?? 0) > 200 ? '...' : ''}`,
-      }],
-    };
+    }, { quarantineOrigins: ['brain', 'distilled', 'external'] as Origin[] });
+
+    const text = decision.status === 'quarantined'
+      ? `Proposed — QUARANTINED pending owner review (id ${decision.row_id?.slice(0, 8)}). This is the expected outcome for machine writes; do not retry.`
+      : decision.status === 'committed'
+        ? `Knowledge committed: ${decision.row_id?.slice(0, 8)} (${params.type}/${params.key})`
+        : `Proposal ${decision.status}: ${decision.reason ?? 'no reason given'}`;
+    return { content: [{ type: 'text' as const, text }] };
   },
 );
 

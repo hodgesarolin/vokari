@@ -3,6 +3,8 @@ import Database from 'better-sqlite3';
 import { initKnowledge, upsertKnowledge, addKnowledge, getKnowledge, searchKnowledge } from '../src/knowledge.js';
 import {
   proposeMemoryWrite,
+  approveProposal,
+  rejectProposal,
   currentKnowledge,
   knowledgeHistory,
   writeRatesByType,
@@ -351,5 +353,80 @@ describe('regressions', () => {
     const d = proposeMemoryWrite(db, valid({ origin: 'brain', content: 'overwrote it' }));
     expect(d.status).toBe('needs_approval');
     expect(currentKnowledge(db, 'belief', 'k1')?.content).toBe('incumbent');
+  });
+});
+
+describe('adjudication — approveProposal / rejectProposal', () => {
+  const hold = (over: Partial<MemoryProposal> = {}) =>
+    proposeMemoryWrite(db, valid(over), { quarantineOrigins: ['brain'] });
+
+  it('approve assigns the pending key, clears quarantine, and the row becomes current', () => {
+    const held = hold({ key: 'adj-1', content: 'held fact' });
+    expect(held.status).toBe('quarantined');
+    const d = approveProposal(db, held.row_id!);
+    expect(d.status).toBe('committed');
+    expect(d.row_id).toBe(held.row_id);
+    const cur = currentKnowledge(db, 'belief', 'adj-1');
+    expect(cur?.id).toBe(held.row_id);
+    const raw = db.prepare('SELECT metadata, quarantined FROM knowledge WHERE id = ?').get(held.row_id!) as { metadata: string; quarantined: number };
+    expect(raw.quarantined).toBe(0);
+    const meta = JSON.parse(raw.metadata);
+    expect(meta.pending_key).toBeUndefined();
+    expect(meta.approved_at).toBeTruthy();
+  });
+
+  it('approve supersedes the AS-OF-NOW incumbent — even an owner row — and reports the conflicts', () => {
+    const held = hold({ key: 'adj-2', content: 'machine version' });
+    // The world moves after the proposal: an owner statement lands at the key.
+    const ownerWrite = proposeMemoryWrite(db, valid({ origin: 'owner', key: 'adj-2', content: 'owner version' }));
+    expect(ownerWrite.status).toBe('committed');
+
+    const d = approveProposal(db, held.row_id!);
+    expect(d.status).toBe('committed');
+    expect(d.superseded_row_id).toBe(ownerWrite.row_id);
+    expect(d.conflicts?.map((c) => c.reason)).toEqual(
+      expect.arrayContaining(['content_differs', 'owner_row_exists']),
+    );
+    expect(currentKnowledge(db, 'belief', 'adj-2')?.content).toBe('machine version');
+    const old = db.prepare('SELECT superseded_by FROM knowledge WHERE id = ?').get(ownerWrite.row_id!) as { superseded_by: string };
+    expect(old.superseded_by).toBe(held.row_id);
+  });
+
+  it('refuses to adjudicate a committed row or an unknown id', () => {
+    const committed = proposeMemoryWrite(db, valid({ origin: 'owner', key: 'adj-3' }));
+    expect(approveProposal(db, committed.row_id!).status).toBe('rejected');
+    expect(approveProposal(db, 'no-such-id').reason).toMatch(/no row/);
+    expect(rejectProposal(db, 'no-such-id').reason).toMatch(/no row/);
+  });
+
+  it('a row can be adjudicated exactly once — the loser of any second attempt is told so', () => {
+    const held = hold({ key: 'adj-4' });
+    expect(approveProposal(db, held.row_id!).status).toBe('committed');
+    expect(approveProposal(db, held.row_id!).reason).toMatch(/not quarantined|already adjudicated/);
+    const held2 = hold({ key: 'adj-5' });
+    expect(rejectProposal(db, held2.row_id!).row_id).toBe(held2.row_id);
+    expect(approveProposal(db, held2.row_id!).reason).toMatch(/already adjudicated/);
+  });
+
+  it('reject tombstones append-only: self-superseded, reasoned, never current', () => {
+    const held = hold({ key: 'adj-6', content: 'to be refused' });
+    const d = rejectProposal(db, held.row_id!, 'wrong on the facts');
+    expect(d).toEqual({ status: 'rejected', row_id: held.row_id });
+    const raw = db.prepare('SELECT superseded_by, metadata, key FROM knowledge WHERE id = ?').get(held.row_id!) as { superseded_by: string; metadata: string; key: string | null };
+    expect(raw.superseded_by).toBe(held.row_id); // superseded by itself = retired, replaced by nothing
+    expect(raw.key).toBeNull(); // never occupied the key
+    expect(JSON.parse(raw.metadata).rejected_reason).toBe('wrong on the facts');
+    expect(currentKnowledge(db, 'belief', 'adj-6')).toBeUndefined();
+  });
+
+  it('a keyless proposal approves to a keyless committed row', () => {
+    const held = hold({ key: undefined, content: 'keyless observation' });
+    expect(held.status).toBe('quarantined');
+    const d = approveProposal(db, held.row_id!);
+    expect(d.status).toBe('committed');
+    expect(d.superseded_row_id).toBeUndefined();
+    const raw = db.prepare('SELECT key, quarantined FROM knowledge WHERE id = ?').get(held.row_id!) as { key: string | null; quarantined: number };
+    expect(raw.key).toBeNull();
+    expect(raw.quarantined).toBe(0);
   });
 });

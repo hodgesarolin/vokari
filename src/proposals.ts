@@ -448,6 +448,140 @@ export function proposeMemoryWrite(
   return txn.immediate();
 }
 
+// ── Adjudication ──
+
+/**
+ * Capability marker: this build can transition a held row by id. Same rationale as
+ * SUPPORTS_PROPOSAL_POLICY — an older build simply lacks these exports, and a caller
+ * that must fail closed checks the marker rather than discovering a TypeError.
+ */
+export const SUPPORTS_ADJUDICATION = true;
+
+/** The decision an adjudication call returns. */
+export interface AdjudicationResult {
+  status: 'committed' | 'rejected';
+  row_id?: string;
+  superseded_row_id?: string;
+  conflicts?: Conflict[];
+  reason?: string;
+}
+
+type AdjudicableRow = {
+  id: string; type: string; content: string; metadata: string | null;
+  origin: string; quarantined: number; superseded_by: string | null;
+};
+
+/**
+ * Fetch-and-verify INSIDE the caller's transaction, never before it: two concurrent
+ * adjudications of one row (or an approve racing a reject) must serialize on the
+ * IMMEDIATE write lock and the loser must see the winner's superseded_by, not a
+ * pre-transaction snapshot that says the row is still pending.
+ */
+function loadAdjudicable(db: Database.Database, id: string):
+  | { row: AdjudicableRow }
+  | { error: string } {
+  const row = db.prepare(
+    'SELECT id, type, content, metadata, origin, quarantined, superseded_by FROM knowledge WHERE id = ?',
+  ).get(id) as AdjudicableRow | undefined;
+  if (!row) return { error: `no row with id ${id}` };
+  if (!row.quarantined) return { error: `row ${id} is not quarantined — nothing to adjudicate` };
+  if (row.superseded_by !== null) return { error: `row ${id} was already adjudicated` };
+  return { row };
+}
+
+/**
+ * Approve a held row: perform the supersession that proposeMemoryWrite deliberately
+ * deferred when it quarantined the write — but against the store AS OF NOW, not as of
+ * proposal time. The world may have moved: a different row may hold the key, an owner
+ * statement may have landed. Approval is an OWNER act (the only caller is the owner's
+ * review surface), so an incumbent — even an owner-origin one — is superseded by the
+ * approval itself; conflicts are reported for transparency, never used to refuse, because
+ * the human clicking approve IS the acknowledgement every conflict gate exists to obtain.
+ *
+ * Mechanics: the held row is keyless with the intended key parked at metadata.pending_key
+ * (that is what kept it out of the (type, key) partial unique index). Approval supersedes
+ * any current holder of that key, then assigns the key and clears the flag — same
+ * supersede-before-occupy ordering as proposeMemoryWrite, same IMMEDIATE transaction.
+ */
+export function approveProposal(db: Database.Database, id: string): AdjudicationResult {
+  const txn = db.transaction((): AdjudicationResult => {
+    const loaded = loadAdjudicable(db, id);
+    if ('error' in loaded) return { status: 'rejected', reason: loaded.error };
+    const ts = now();
+    const conflicts: Conflict[] = [];
+    let metadata: Record<string, unknown> = {};
+    try { metadata = loaded.row.metadata ? JSON.parse(loaded.row.metadata) : {}; } catch { metadata = {}; }
+    const pendingKey = typeof metadata.pending_key === 'string' ? metadata.pending_key : null;
+    const { pending_key: _dropped, ...restMetadata } = metadata;
+
+    let supersededRowId: string | undefined;
+    if (pendingKey) {
+      const incumbent = db.prepare(
+        'SELECT id, content, origin, updated_at FROM knowledge WHERE type = ? AND key = ? AND superseded_by IS NULL',
+      ).get(loaded.row.type, pendingKey) as CurrentRow | undefined;
+      if (incumbent) {
+        const base = {
+          row_id: incumbent.id,
+          existing_origin: (incumbent.origin ?? 'legacy') as Origin,
+          existing_updated_at: incumbent.updated_at,
+        };
+        if (incumbent.content !== loaded.row.content) conflicts.push({ ...base, reason: 'content_differs' });
+        if ((incumbent.origin ?? 'legacy') === 'owner') conflicts.push({ ...base, reason: 'owner_row_exists' });
+        db.prepare('UPDATE knowledge SET superseded_by = ?, updated_at = ? WHERE id = ?')
+          .run(id, ts, incumbent.id);
+        supersededRowId = incumbent.id;
+      }
+    }
+
+    db.prepare(
+      'UPDATE knowledge SET key = ?, metadata = ?, quarantined = 0, updated_at = ?, last_verified = ? WHERE id = ?',
+    ).run(
+      pendingKey,
+      JSON.stringify({ ...restMetadata, approved_at: ts }),
+      ts,
+      ts,
+      id,
+    );
+
+    return {
+      status: 'committed',
+      row_id: id,
+      ...(supersededRowId ? { superseded_row_id: supersededRowId } : {}),
+      ...(conflicts.length ? { conflicts } : {}),
+    };
+  });
+
+  return txn.immediate();
+}
+
+/**
+ * Reject a held row: retire it append-only. The row is tombstoned by superseding it with
+ * ITSELF — unambiguous ("replaced by nothing newer"), requires no schema change, and the
+ * pending queue's `superseded_by IS NULL` filter drops it while history keeps the full
+ * record of what was proposed and refused. A rejected row was never current (quarantined
+ * rows are keyless), so nothing is displaced.
+ */
+export function rejectProposal(db: Database.Database, id: string, reason?: string): AdjudicationResult {
+  const txn = db.transaction((): AdjudicationResult => {
+    const loaded = loadAdjudicable(db, id);
+    if ('error' in loaded) return { status: 'rejected', reason: loaded.error };
+    const ts = now();
+    let metadata: Record<string, unknown> = {};
+    try { metadata = loaded.row.metadata ? JSON.parse(loaded.row.metadata) : {}; } catch { metadata = {}; }
+    db.prepare(
+      'UPDATE knowledge SET superseded_by = ?, metadata = ?, updated_at = ? WHERE id = ?',
+    ).run(
+      id,
+      JSON.stringify({ ...metadata, rejected_at: ts, ...(reason ? { rejected_reason: reason } : {}) }),
+      ts,
+      id,
+    );
+    return { status: 'rejected', row_id: id };
+  });
+
+  return txn.immediate();
+}
+
 // ── Projection ──
 
 /**
