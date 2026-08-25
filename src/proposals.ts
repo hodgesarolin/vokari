@@ -448,6 +448,83 @@ export function proposeMemoryWrite(
   return txn.immediate();
 }
 
+// ── Scoped reads ──
+
+/**
+ * Capability marker: this build's read surface accepts a ReadScope. A caller
+ * that enforces a classification cap MUST fail closed on a build without this —
+ * a scope silently ignored by an older build would return sensitive rows to a
+ * provider that should never see them, which is worse than not reading at all.
+ */
+export const SUPPORTS_SCOPED_READS = true;
+
+/**
+ * The sensitivity ladder, least → most restricted. Index is the rank. 'secret'
+ * never actually enters the store (validate() rejects it on write), but it
+ * completes the ladder so a cap of 'sensitive' is expressible.
+ */
+export const CLASSIFICATION_LADDER: readonly Classification[] =
+  ['public', 'internal', 'personal', 'sensitive', 'secret'];
+
+/**
+ * A read scope: the policy a caller attaches to a read so the STORE, not the
+ * caller, enforces what may be seen. Both fields optional; an empty scope
+ * (or no scope) reads everything, exactly as before this existed.
+ */
+export interface ReadScope {
+  /**
+   * Cap: exclude any row MORE sensitive than this. A row with no classification
+   * is treated as 'personal' — fail closed, so an unlabeled row is withheld
+   * from a cloud-tier read rather than leaked by omission. (The backfill job
+   * exists to make that default rare; the default exists so a missed row is
+   * safe, not exposed.)
+   */
+  maxClassification?: Classification;
+  /**
+   * Topic gate: if set, a row must carry at least one of these topics.
+   * Untagged rows are excluded when this is active — a topic-scoped read has
+   * no business returning rows that declared no topic. Empty array = no gate.
+   */
+  topics?: readonly string[];
+}
+
+/**
+ * Build the SQL fragment + params enforcing a scope, for splicing into a read's
+ * WHERE clause. `col` is the column prefix ('k.' for the aliased search join,
+ * '' for the un-aliased single-table reads). Returns an empty fragment for an
+ * empty/absent scope, so unscoped callers are byte-identical to before.
+ *
+ * Kept as string-fragment composition rather than a query builder because every
+ * read here is already hand-written SQL and one shared helper is easier to audit
+ * than a second query path — the whole point of scoping is that it is auditable.
+ */
+export function buildScopeClause(scope: ReadScope | undefined, col = ''): { sql: string; params: string[] } {
+  if (!scope) return { sql: '', params: [] };
+  const parts: string[] = [];
+  const params: string[] = [];
+
+  if (scope.maxClassification) {
+    const capRank = CLASSIFICATION_LADDER.indexOf(scope.maxClassification);
+    // An unknown cap value is a caller bug; fail closed to the tightest cap
+    // rather than letting a typo widen access.
+    const allowed = CLASSIFICATION_LADDER.filter((_, i) => i <= (capRank < 0 ? 0 : capRank));
+    // COALESCE folds NULL/unlabeled to 'personal' (the fail-closed default) for
+    // the comparison, so an unlabeled row is included only when the cap reaches
+    // personal.
+    parts.push(`COALESCE(${col}classification, 'personal') IN (${allowed.map(() => '?').join(',')})`);
+    params.push(...allowed);
+  }
+
+  if (scope.topics && scope.topics.length > 0) {
+    // json_each over a NULL/empty topics column yields no rows, so EXISTS is
+    // false and an untagged row is correctly excluded under an active gate.
+    parts.push(`EXISTS (SELECT 1 FROM json_each(${col}topics) je WHERE je.value IN (${scope.topics.map(() => '?').join(',')}))`);
+    params.push(...scope.topics);
+  }
+
+  return parts.length ? { sql: ` AND ${parts.join(' AND ')}`, params } : { sql: '', params: [] };
+}
+
 // ── Adjudication ──
 
 /**
@@ -594,12 +671,14 @@ export function currentKnowledge(
   db: Database.Database,
   type: string,
   key: string,
+  scope?: ReadScope,
 ): { id: string; content: string; origin: Origin; updated_at: string } | undefined {
+  const s = buildScopeClause(scope);
   const row = db.prepare(`
     SELECT id, content, COALESCE(origin, 'legacy') AS origin, updated_at
     FROM knowledge
-    WHERE type = ? AND key = ? AND superseded_by IS NULL AND quarantined = 0
-  `).get(type, key) as { id: string; content: string; origin: Origin; updated_at: string } | undefined;
+    WHERE type = ? AND key = ? AND superseded_by IS NULL AND quarantined = 0${s.sql}
+  `).get(type, key, ...s.params) as { id: string; content: string; origin: Origin; updated_at: string } | undefined;
   return row;
 }
 
@@ -610,13 +689,15 @@ export function knowledgeHistory(
   db: Database.Database,
   type: string,
   key: string,
+  scope?: ReadScope,
 ): { id: string; content: string; origin: Origin; source: string | null; created_at: string; superseded_by: string | null }[] {
+  const s = buildScopeClause(scope);
   return db.prepare(`
     SELECT id, content, COALESCE(origin, 'legacy') AS origin, source, created_at, superseded_by
     FROM knowledge
-    WHERE type = ? AND (key = ? OR json_extract(metadata, '$.pending_key') = ?)
+    WHERE type = ? AND (key = ? OR json_extract(metadata, '$.pending_key') = ?)${s.sql}
     ORDER BY created_at DESC
-  `).all(type, key, key) as { id: string; content: string; origin: Origin; source: string | null; created_at: string; superseded_by: string | null }[];
+  `).all(type, key, key, ...s.params) as { id: string; content: string; origin: Origin; source: string | null; created_at: string; superseded_by: string | null }[];
 }
 
 /**

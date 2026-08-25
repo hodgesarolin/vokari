@@ -10,6 +10,7 @@ import {
   writeRatesByType,
   type MemoryProposal,
   type Origin,
+  type Classification,
 } from '../src/proposals.js';
 
 let db: Database.Database;
@@ -428,5 +429,74 @@ describe('adjudication — approveProposal / rejectProposal', () => {
     const raw = db.prepare('SELECT key, quarantined FROM knowledge WHERE id = ?').get(held.row_id!) as { key: string | null; quarantined: number };
     expect(raw.key).toBeNull();
     expect(raw.quarantined).toBe(0);
+  });
+});
+
+describe('scoped reads — classification cap + topic gate', () => {
+  // Seed committed rows at known classifications/topics via the owner write path
+  // (owner commits directly, so these are current rows a scoped read must filter).
+  const seed = (over: Partial<MemoryProposal>) => proposeMemoryWrite(db, valid({ origin: 'owner', ...over }));
+  beforeEach(() => {
+    seed({ key: 'pub', classification: 'public', topics: ['infra'], content: 'the studio serves oMLX on a port' });
+    seed({ key: 'int', classification: 'internal', topics: ['infra'], content: 'the studio serves models over MTPLX' });
+    seed({ key: 'per', classification: 'personal', topics: ['family'], content: 'the studio room is upstairs at home' });
+    seed({ key: 'sen', classification: 'sensitive', topics: ['health'], content: 'the studio doctor visit notes' });
+    seed({ key: 'unlabeled', classification: 'internal', topics: ['meta'], content: 'studio note' });
+    // Force one row to NULL classification to exercise the fail-closed default.
+    db.prepare("UPDATE knowledge SET classification = NULL WHERE key = 'unlabeled'").run();
+  });
+
+  it('currentKnowledge cap excludes rows above it; NULL classification is treated as personal', () => {
+    // Cap internal: public + internal in, personal/sensitive out, NULL(→personal) out.
+    expect(currentKnowledge(db, 'belief', 'pub', { maxClassification: 'internal' })).toBeDefined();
+    expect(currentKnowledge(db, 'belief', 'int', { maxClassification: 'internal' })).toBeDefined();
+    expect(currentKnowledge(db, 'belief', 'per', { maxClassification: 'internal' })).toBeUndefined();
+    expect(currentKnowledge(db, 'belief', 'sen', { maxClassification: 'internal' })).toBeUndefined();
+    expect(currentKnowledge(db, 'belief', 'unlabeled', { maxClassification: 'internal' })).toBeUndefined();
+    // Cap personal: the NULL row now included (fail-closed default is exactly personal).
+    expect(currentKnowledge(db, 'belief', 'unlabeled', { maxClassification: 'personal' })).toBeDefined();
+    expect(currentKnowledge(db, 'belief', 'sen', { maxClassification: 'personal' })).toBeUndefined();
+  });
+
+  it('an unscoped read is unchanged — every current row visible', () => {
+    for (const k of ['pub', 'int', 'per', 'sen', 'unlabeled']) {
+      expect(currentKnowledge(db, 'belief', k)).toBeDefined();
+    }
+  });
+
+  it('searchKnowledge honors the classification cap', () => {
+    const capped = searchKnowledge(db, 'studio', { scope: { maxClassification: 'internal' } });
+    const keys = capped.map((r) => r.key);
+    expect(keys).toContain('pub');
+    expect(keys).toContain('int');
+    expect(keys).not.toContain('per');
+    expect(keys).not.toContain('sen');
+    expect(keys).not.toContain('unlabeled'); // NULL → personal → excluded
+    // Unscoped search still sees everything.
+    expect(searchKnowledge(db, 'studio').length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('the topic gate admits only rows sharing a listed topic; untagged excluded', () => {
+    const infra = currentKnowledge(db, 'belief', 'pub', { topics: ['infra'] });
+    expect(infra).toBeDefined();
+    const wrongTopic = currentKnowledge(db, 'belief', 'pub', { topics: ['health'] });
+    expect(wrongTopic).toBeUndefined();
+    // Cap + gate compose (AND): internal-capped AND family-topic → only 'per' qualifies on
+    // topic but it's personal, so nothing; family+personal cap returns it.
+    expect(currentKnowledge(db, 'belief', 'per', { maxClassification: 'personal', topics: ['family'] })).toBeDefined();
+    expect(currentKnowledge(db, 'belief', 'per', { maxClassification: 'internal', topics: ['family'] })).toBeUndefined();
+  });
+
+  it('an unknown cap value fails closed to the tightest (public only)', () => {
+    // A caller typo must not widen access.
+    const s = searchKnowledge(db, 'studio', { scope: { maxClassification: 'nonsense' as Classification } });
+    expect(s.map((r) => r.key)).toEqual(['pub']);
+  });
+
+  it('knowledgeHistory respects the cap too', () => {
+    const h = knowledgeHistory(db, 'belief', 'sen', { maxClassification: 'internal' });
+    expect(h).toHaveLength(0);
+    const h2 = knowledgeHistory(db, 'belief', 'sen', { maxClassification: 'sensitive' });
+    expect(h2.length).toBeGreaterThan(0);
   });
 });
