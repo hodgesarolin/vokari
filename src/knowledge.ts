@@ -18,7 +18,8 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
-import { initProposals } from './proposals.js';
+import { initProposals, buildScopeClause } from './proposals.js';
+import type { ReadScope } from './proposals.js';
 
 // ── Types ──
 
@@ -143,6 +144,9 @@ export interface SearchKnowledgeOpts {
   limit?: number;
   dateAfter?: string;
   dateBefore?: string;
+  // Read scope: classification cap + topic gate, enforced in-query (see
+  // buildScopeClause). Omitted = unscoped, byte-identical to before.
+  scope?: ReadScope;
 }
 
 export interface KnowledgeSearchResult extends Knowledge {
@@ -563,7 +567,7 @@ export function searchKnowledge(
   queryText: string,
   opts: SearchKnowledgeOpts = {},
 ): KnowledgeSearchResult[] {
-  const { type, types, limit = 10, dateAfter, dateBefore } = opts;
+  const { type, types, limit = 10, dateAfter, dateBefore, scope } = opts;
 
   // Sanitize query for FTS5 — remove all special chars that break MATCH syntax
   const sanitized = queryText
@@ -609,6 +613,12 @@ export function searchKnowledge(
     sql += ` AND k.created_at <= ?`;
     params.push(dateBefore);
   }
+
+  // Scope enforcement rides on the same k.* alias as the projection filters
+  // above — classification cap + topic gate, in-query so no row leaves the DB.
+  const scoped = buildScopeClause(scope, 'k.');
+  sql += scoped.sql;
+  params.push(...scoped.params);
 
   sql += ` ORDER BY rank ASC LIMIT ?`;
   params.push(limit);
